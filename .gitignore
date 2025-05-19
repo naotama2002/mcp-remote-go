@@ -40,3 +40,4 @@ Thumbs.db
 *.auth
 
 .env
+/mcp-remote-ts/
