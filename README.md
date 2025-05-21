@@ -1,5 +1,3 @@
-MCP クライアントから STDIO を MCP 仕様に従った認証つき SSE サーバに Proxy するプログラムを Go言語で作成してください
-
 # MCP Remote for Go
 
 This Go implementation allows MCP clients that only support local (stdio) connections to connect to remote MCP servers with authentication support.
