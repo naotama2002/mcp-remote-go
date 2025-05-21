@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url" // Import net/url
 	"os"
 	"strings"
 	"sync"
@@ -19,18 +20,20 @@ import (
 
 // Proxy handles the bidirectional communication between stdio (MCP client) and the remote server
 type Proxy struct {
-	serverURL     string
-	callbackPort  int
-	headers       map[string]string
-	serverURLHash string
-	authCoord     *auth.Coordinator
-	ctx           context.Context
-	cancel        context.CancelFunc
-	client        *http.Client
-	eventSource   *EventSource
-	stdioReader   *bufio.Reader
-	stdioWriter   *bufio.Writer
-	wg            sync.WaitGroup
+	serverURL      string
+	callbackPort   int
+	headers        map[string]string
+	serverURLHash  string
+	authCoord      *auth.Coordinator
+	ctx            context.Context
+	cancel         context.CancelFunc
+	client         *http.Client
+	eventSource    *EventSource
+	stdioReader    *bufio.Reader
+	stdioWriter    *bufio.Writer
+	wg             sync.WaitGroup
+	dynamicPostURL string       // To store URL from "endpoint" event
+	postURLMutex   sync.RWMutex // To protect dynamicPostURL
 }
 
 // NewProxy creates a new MCP proxy
@@ -51,9 +54,11 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 		authCoord:     authCoord,
 		ctx:           ctx,
 		cancel:        cancel,
-		client:        &http.Client{},
-		stdioReader:   bufio.NewReader(os.Stdin),
-		stdioWriter:   bufio.NewWriter(os.Stdout),
+		client:         &http.Client{},
+		stdioReader:    bufio.NewReader(os.Stdin),
+		stdioWriter:    bufio.NewWriter(os.Stdout),
+		dynamicPostURL: "", // Initialize as empty
+		// postURLMutex is initialized with its zero value (unlocked mutex)
 	}, nil
 }
 
@@ -207,17 +212,26 @@ func (p *Proxy) processStdioInput() {
 
 // sendToServer sends a message to the remote server
 func (p *Proxy) sendToServer(message string) error {
-	if p.eventSource == nil {
-		return errors.New("not connected to server")
+	if p.eventSource == nil { // This check is for the SSE connection status
+		return errors.New("not connected to SSE server")
 	}
 
-	// For SSE, we need to send messages via separate HTTP POST
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(message))
+	p.postURLMutex.RLock() // Lock for reading the dynamicPostURL
+	postURL := p.dynamicPostURL
+	p.postURLMutex.RUnlock() // Unlock after reading
+
+	if postURL == "" {
+		log.Println("Error: POST endpoint URL from server is not yet known. Cannot send message.")
+		return errors.New("POST endpoint not yet known from server")
+	}
+
+	// Create POST request using the dynamicPostURL
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, postURL, strings.NewReader(message))
 	if err != nil {
-		return fmt.Errorf("failed to create POST request: %w", err)
+		return fmt.Errorf("failed to create POST request to %s: %w", postURL, err)
 	}
 
-	// Add headers
+	// Add custom headers
 	for k, v := range p.headers {
 		req.Header.Set(k, v)
 	}
@@ -233,13 +247,13 @@ func (p *Proxy) sendToServer(message string) error {
 	// Send the request
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("POST request failed: %w", err)
+		return fmt.Errorf("POST request to %s failed: %w", postURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned error status: %d - %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(resp.Body) // Best effort to read body
+		return fmt.Errorf("server at %s returned error status: %d - %s", postURL, resp.StatusCode, string(body))
 	}
 
 	return nil
@@ -247,13 +261,53 @@ func (p *Proxy) sendToServer(message string) error {
 
 // handleServerMessage processes messages received from the SSE server
 func (p *Proxy) handleServerMessage(event string, data []byte) {
-	if event != "message" {
-		// Handle non-message events if needed
-		return
-	}
+    if event == "endpoint" {
+        rawEndpointURI := strings.TrimSpace(string(data))
+        if rawEndpointURI == "" {
+            log.Println("Received 'endpoint' event with empty URI data. No update to POST URL.")
+            return
+        }
 
-	// Parse message to log method (but don't modify it)
-	var msg map[string]interface{}
+        receivedURI, err := url.Parse(rawEndpointURI)
+        if err != nil {
+            log.Printf("Error parsing 'endpoint' event URI data ('%s'): %v. No update to POST URL.", rawEndpointURI, err)
+            return
+        }
+
+        var finalPostURLString string
+        if receivedURI.IsAbs() {
+            finalPostURLString = receivedURI.String()
+            log.Printf("Received absolute POST endpoint URI from server: %s", finalPostURLString)
+        } else {
+            // URI is relative, resolve it against the original serverURL's base
+            // p.serverURL is the URL used for the SSE connection itself.
+            baseSSEURL, err := url.Parse(p.serverURL)
+            if err != nil {
+                // This should ideally not happen if serverURL was validated upfront
+                log.Printf("Critical error: could not parse own serverURL ('%s') for resolving relative endpoint: %v. No update to POST URL.", p.serverURL, err)
+                return
+            }
+            resolvedURL := baseSSEURL.ResolveReference(receivedURI)
+            finalPostURLString = resolvedURL.String()
+            log.Printf("Received relative POST endpoint URI ('%s'), resolved to: %s (base SSE URL was '%s')", rawEndpointURI, finalPostURLString, p.serverURL)
+        }
+
+        p.postURLMutex.Lock()
+        p.dynamicPostURL = finalPostURLString
+        p.postURLMutex.Unlock()
+        
+        log.Printf("Dynamic POST URL for client messages updated to: %s", finalPostURLString)
+        return 
+    }
+
+    // Process other events
+    if event != "message" {
+        log.Printf("Received non-message SSE event: type '%s', data: %s", event, string(data))
+        return
+    }
+
+    // Process "message" events:
+    var msg map[string]interface{}
 	if err := json.Unmarshal(data, &msg); err == nil {
 		if method, ok := msg["method"].(string); ok {
 			log.Printf("[Remote→Local] %s", method)
