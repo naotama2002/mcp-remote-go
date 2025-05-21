@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,18 +20,20 @@ import (
 
 // Proxy handles the bidirectional communication between stdio (MCP client) and the remote server
 type Proxy struct {
-	serverURL     string
-	callbackPort  int
-	headers       map[string]string
-	serverURLHash string
-	authCoord     *auth.Coordinator
-	ctx           context.Context
-	cancel        context.CancelFunc
-	client        *http.Client
-	eventSource   *EventSource
-	stdioReader   *bufio.Reader
-	stdioWriter   *bufio.Writer
-	wg            sync.WaitGroup
+	serverURL       string
+	callbackPort    int
+	headers         map[string]string
+	serverURLHash   string
+	authCoord       *auth.Coordinator
+	ctx             context.Context
+	cancel          context.CancelFunc
+	client          *http.Client
+	eventSource     *EventSource
+	stdioReader     *bufio.Reader
+	stdioWriter     *bufio.Writer
+	wg              sync.WaitGroup
+	commandEndpoint string // MCP command endpoint URL
+	mu              sync.Mutex // ミューテックスをcommandEndpointの保護に使用
 }
 
 // NewProxy creates a new MCP proxy
@@ -86,6 +89,53 @@ func (p *Proxy) Shutdown() {
 	}
 	p.cancel()
 	p.wg.Wait()
+}
+
+// getCommandURL converts the SSE URL to the command endpoint URL
+func (p *Proxy) getCommandURL() string {
+	commandURL := p.GetCommandEndpoint()
+	if commandURL != "" {
+		// ベースURLを抽出（スキーム+ホスト部分）
+		baseURL, err := url.Parse(p.serverURL)
+		if err != nil {
+			log.Printf("Failed to parse server URL: %v, using direct concatenation", err)
+			return p.serverURL + commandURL
+		}
+		
+		// スキームとホストのみを取得（パスは除外）
+		baseURL.Path = ""
+		
+		// ベースURLにcommandURLを結合
+		resultURL, err := url.Parse(baseURL.String())
+		if err != nil {
+			return resultURL.String() + commandURL // フォールバック
+		}
+		
+		// commandURLが絶対URLなら、そのまま返す
+		if strings.HasPrefix(commandURL, "http://") || strings.HasPrefix(commandURL, "https://") {
+			return commandURL
+		}
+		
+		// 相対URLなら、ベースURLと結合
+		relativeURL, err := url.Parse(commandURL)
+		if err != nil {
+			return baseURL.String() + commandURL // フォールバック
+		}
+		
+		return baseURL.ResolveReference(relativeURL).String()
+	}
+
+	// サーバーURLからベースURL（スキーム+ホスト）を抽出し、コマンドエンドポイントを作成
+	u, err := url.Parse(p.serverURL)
+	if err != nil {	
+		// パース失敗時はフォールバック（元のURLに/messageを追加）
+		return p.serverURL + "/message"
+	}
+
+	// ベースURLに/messageパスを設定（既存のパスは上書き）
+	u.Path = "/message"
+
+	return u.String()
 }
 
 // connectToServer establishes a connection to the SSE server with authentication if needed
@@ -211,8 +261,10 @@ func (p *Proxy) sendToServer(message string) error {
 		return errors.New("not connected to server")
 	}
 
-	// For SSE, we need to send messages via separate HTTP POST
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(message))
+	commandURL := p.getCommandURL()
+
+	// Send message to command endpoint via HTTP POST
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, commandURL, strings.NewReader(message))
 	if err != nil {
 		return fmt.Errorf("failed to create POST request: %w", err)
 	}
@@ -245,10 +297,33 @@ func (p *Proxy) sendToServer(message string) error {
 	return nil
 }
 
+// SetCommandEndpoint sets the command endpoint URL
+func (p *Proxy) SetCommandEndpoint(endpoint string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.commandEndpoint = endpoint
+}
+
+// GetCommandEndpoint returns the command endpoint URL
+func (p *Proxy) GetCommandEndpoint() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.commandEndpoint
+}
+
 // handleServerMessage processes messages received from the SSE server
 func (p *Proxy) handleServerMessage(event string, data []byte) {
+	// Handle special event types
+	if event == "endpoint" {
+		// MCPの仕様に基づき、サーバーが提供するcommandエンドポイントを保存
+		endpoint := string(data)
+		log.Printf("Received command endpoint: %s", endpoint)
+		p.SetCommandEndpoint(endpoint)
+		return
+	}
+	
 	if event != "message" {
-		// Handle non-message events if needed
+		// Handle other non-message events if needed
 		return
 	}
 
