@@ -32,7 +32,9 @@ func main() {
 
 		// If port is provided as second argument
 		if len(flag.Args()) > 1 {
-			fmt.Sscanf(flag.Arg(1), "%d", &callbackPort)
+			if _, err := fmt.Sscanf(flag.Arg(1), "%d", &callbackPort); err != nil {
+				log.Printf("Warning: failed to parse callback port: %v", err)
+			}
 		}
 	}
 

@@ -32,7 +32,7 @@ type Proxy struct {
 	stdioReader     *bufio.Reader
 	stdioWriter     *bufio.Writer
 	wg              sync.WaitGroup
-	commandEndpoint string // MCP command endpoint URL
+	commandEndpoint string     // MCP command endpoint URL
 	mu              sync.Mutex // ミューテックスをcommandEndpointの保護に使用
 }
 
@@ -43,6 +43,7 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 	// Create auth coordinator
 	authCoord, err := auth.NewCoordinator(serverURLHash, callbackPort)
 	if err != nil {
+		cancel() // リソースリークを防ぐためにcancelを呼び出す
 		return nil, fmt.Errorf("failed to create auth coordinator: %w", err)
 	}
 
@@ -101,33 +102,33 @@ func (p *Proxy) getCommandURL() string {
 			log.Printf("Failed to parse server URL: %v, using direct concatenation", err)
 			return p.serverURL + commandURL
 		}
-		
+
 		// スキームとホストのみを取得（パスは除外）
 		baseURL.Path = ""
-		
+
 		// ベースURLにcommandURLを結合
 		resultURL, err := url.Parse(baseURL.String())
 		if err != nil {
 			return resultURL.String() + commandURL // フォールバック
 		}
-		
+
 		// commandURLが絶対URLなら、そのまま返す
 		if strings.HasPrefix(commandURL, "http://") || strings.HasPrefix(commandURL, "https://") {
 			return commandURL
 		}
-		
+
 		// 相対URLなら、ベースURLと結合
 		relativeURL, err := url.Parse(commandURL)
 		if err != nil {
 			return baseURL.String() + commandURL // フォールバック
 		}
-		
+
 		return baseURL.ResolveReference(relativeURL).String()
 	}
 
 	// サーバーURLからベースURL（スキーム+ホスト）を抽出し、コマンドエンドポイントを作成
 	u, err := url.Parse(p.serverURL)
-	if err != nil {	
+	if err != nil {
 		// パース失敗時はフォールバック（元のURLに/messageを追加）
 		return p.serverURL + "/message"
 	}
@@ -287,7 +288,11 @@ func (p *Proxy) sendToServer(message string) error {
 	if err != nil {
 		return fmt.Errorf("POST request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -321,7 +326,7 @@ func (p *Proxy) handleServerMessage(event string, data []byte) {
 		p.SetCommandEndpoint(endpoint)
 		return
 	}
-	
+
 	if event != "message" {
 		// Handle other non-message events if needed
 		return
@@ -343,7 +348,9 @@ func (p *Proxy) handleServerMessage(event string, data []byte) {
 		log.Printf("Error writing to STDIO: %v", err)
 		return
 	}
-	p.stdioWriter.Flush()
+	if err := p.stdioWriter.Flush(); err != nil {
+		log.Printf("Error flushing STDIO: %v", err)
+	}
 }
 
 // handleServerError handles errors from the SSE connection

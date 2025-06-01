@@ -16,10 +16,7 @@ git clone https://github.com/naotama2002/mcp-remote-go.git
 cd mcp-remote-go
 
 # Build the binary
-go build -o bin/mcp-remote-go
-
-# Install to your PATH (optional)
-# cp bin/mcp-remote-go /usr/local/bin/
+make build
 ```
 
 ## Usage

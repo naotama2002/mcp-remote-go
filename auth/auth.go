@@ -150,7 +150,11 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	// Read response
 	body, err := io.ReadAll(resp.Body)
@@ -267,7 +271,11 @@ func (c *Coordinator) fetchServerMetadata(metadataURL string) (*ServerMetadata, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
@@ -328,7 +336,11 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("client registration request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -370,7 +382,7 @@ func (c *Coordinator) startCallbackServer() error {
 		case c.callbackChan <- code:
 			// Send success response
 			w.Header().Set("Content-Type", "text/html")
-			w.Write([]byte(`
+			if _, err := w.Write([]byte(`
 				<html>
 				<head><title>Authorization Successful</title></head>
 				<body>
@@ -379,7 +391,9 @@ func (c *Coordinator) startCallbackServer() error {
 					<script>window.close();</script>
 				</body>
 				</html>
-			`))
+			`)); err != nil {
+				log.Printf("Warning: failed to write response: %v", err)
+			}
 		default:
 			http.Error(w, "Authorization flow not in progress", http.StatusBadRequest)
 		}

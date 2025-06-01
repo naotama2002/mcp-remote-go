@@ -1,49 +1,62 @@
-.PHONY: build run clean test
+# MCP Remote Go Makefile
 
-# Binary name
+# Variables
 BINARY_NAME=mcp-remote-go
+BUILD_DIR=./build
+MAIN_DIR=./cmd/mcp-remote-go
+GOFLAGS=-trimpath
 
-# Build directory
-BUILD_DIR=bin
+# Get the current git commit hash
+GIT_COMMIT=$(shell git rev-parse --short HEAD)
+BUILD_TIME=$(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+VERSION?=dev
+
+# LDFLAGS
+LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildTime=${BUILD_TIME}"
+
+.PHONY: all build clean test check fmt lint vet
+
+# Default target
+all: clean check build
 
 # Build the application
 build:
-	@mkdir -p $(BUILD_DIR)
-	@echo "Building..."
-	@go build -o $(BUILD_DIR)/$(BINARY_NAME) .
-
-# Run the application
-run:
-	@go run main.go $(ARGS)
+	@echo "Building ${BINARY_NAME}..."
+	@mkdir -p ${BUILD_DIR}
+	go build ${GOFLAGS} ${LDFLAGS} -o ${BUILD_DIR}/${BINARY_NAME} ${MAIN_DIR}
+	@echo "Build complete: ${BUILD_DIR}/${BINARY_NAME}"
 
 # Clean build artifacts
 clean:
-	@echo "Cleaning..."
-	@rm -rf $(BUILD_DIR)
+	@echo "Cleaning build artifacts..."
+	@rm -rf ${BUILD_DIR}
+	@go clean
+	@echo "Clean complete"
 
 # Run tests
 test:
 	@echo "Running tests..."
-	@go test -v ./...
+	go test -v ./...
 
-# Build for multiple platforms
-build-all: clean
-	@mkdir -p $(BUILD_DIR)
-	@echo "Building for multiple platforms..."
-	
-	@echo "Building for Linux (amd64)..."
-	@GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
-	
-	@echo "Building for macOS (amd64)..."
-	@GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 .
-	
-	@echo "Building for macOS (arm64)..."
-	@GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 .
-	
-	@echo "Building for Windows (amd64)..."
-	@GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe .
+# Run all checks (fmt, vet, lint)
+check: fmt vet lint
 
-# Install the application to $GOPATH/bin
-install: build
-	@echo "Installing..."
-	@cp $(BUILD_DIR)/$(BINARY_NAME) $(GOPATH)/bin/ 
+# Format code
+fmt:
+	@echo "Formatting code..."
+	go fmt ./...
+
+# Run go vet
+vet:
+	@echo "Running go vet..."
+	go vet ./...
+
+# Run linter (requires golangci-lint)
+lint:
+	@echo "Running linter..."
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		echo "golangci-lint not installed. Skipping lint."; \
+		echo "To install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; \
+	fi
