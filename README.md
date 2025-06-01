@@ -10,6 +10,8 @@ MCP Remote proxies between:
 
 ## Installation
 
+### Building from Source
+
 ```bash
 # Clone the repository
 git clone https://github.com/naotama2002/mcp-remote-go.git
@@ -19,7 +21,30 @@ cd mcp-remote-go
 make build
 ```
 
+### Using Docker
+
+You can also run `mcp-remote-go` using Docker, which provides a consistent environment and easier deployment.
+
+#### Pull from GitHub Container Registry
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/naotama2002/mcp-remote-go:latest
+
+# Or pull a specific version
+docker pull ghcr.io/naotama2002/mcp-remote-go:v1.0.0
+```
+
+#### Build locally
+
+```bash
+# Build the Docker image
+docker build -t mcp-remote-go .
+```
+
 ## Usage
+
+### Binary Usage
 
 ```bash
 # Basic usage
@@ -35,6 +60,25 @@ mcp-remote-go https://remote.mcp.server/sse --header "Authorization: Bearer YOUR
 mcp-remote-go http://internal.mcp.server/sse --allow-http
 ```
 
+### Docker Usage
+
+```bash
+# Basic usage with Docker
+docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+
+# With custom port for OAuth callback
+docker run --rm -it -p 9090:9090 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse 9090
+
+# With custom headers
+docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse --header "Authorization: Bearer YOUR_TOKEN"
+
+# Allow HTTP for trusted networks
+docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest http://internal.mcp.server/sse --allow-http
+
+# Mount auth directory to persist OAuth tokens
+docker run --rm -it -p 3334:3334 -v ~/.mcp-auth:/home/appuser/.mcp-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+```
+
 ## Configuration for MCP Clients
 
 ### Claude Desktop
@@ -43,7 +87,7 @@ Edit the configuration file at:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Add the following:
+#### Using Binary
 
 ```json
 {
@@ -51,6 +95,48 @@ Add the following:
     "remote-example": {
       "command": "/path/to/mcp-remote-go",
       "args": [
+        "https://remote.mcp.server/sse"
+      ]
+    }
+  }
+}
+```
+
+#### Using Docker
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
+        "https://remote.mcp.server/sse"
+      ]
+    }
+  }
+}
+```
+
+For persistent OAuth tokens with Docker:
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "-v",
+        "~/.mcp-auth:/home/appuser/.mcp-auth",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
       ]
     }
@@ -62,6 +148,8 @@ Add the following:
 
 Edit the configuration file at `~/.cursor/mcp.json`:
 
+#### Using Binary
+
 ```json
 {
   "mcpServers": {
@@ -75,9 +163,31 @@ Edit the configuration file at `~/.cursor/mcp.json`:
 }
 ```
 
+#### Using Docker
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
+        "https://remote.mcp.server/sse"
+      ]
+    }
+  }
+}
+```
+
 ### Windsurf
 
 Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
+
+#### Using Binary
 
 ```json
 {
@@ -85,6 +195,26 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
     "remote-example": {
       "command": "/path/to/mcp-remote-go",
       "args": [
+        "https://remote.mcp.server/sse"
+      ]
+    }
+  }
+}
+```
+
+#### Using Docker
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
       ]
     }
@@ -115,6 +245,39 @@ If you're behind a VPN and experiencing certificate issues, you might need to sp
 ```bash
 export SSL_CERT_FILE=/path/to/ca-certificates.crt
 mcp-remote-go https://remote.mcp.server/sse
+```
+
+### Docker Issues
+
+#### Port Already in Use
+
+If you get a "port already in use" error, either stop the conflicting service or use a different port:
+
+```bash
+# Use a different port
+docker run --rm -it -p 3335:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+```
+
+#### Permission Issues with Volume Mount
+
+If you have permission issues when mounting the auth directory:
+
+```bash
+# Make sure the directory exists and has proper permissions
+mkdir -p ~/.mcp-auth
+chmod 755 ~/.mcp-auth
+
+# Run with volume mount
+docker run --rm -it -p 3334:3334 -v ~/.mcp-auth:/home/appuser/.mcp-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+```
+
+#### Network Issues with MCP Clients
+
+If MCP clients can't connect to the Docker container, try using host networking:
+
+```bash
+# Use host networking mode
+docker run --rm -i --net=host ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
 ```
 
 ## License
