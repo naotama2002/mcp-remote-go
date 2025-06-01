@@ -32,7 +32,7 @@ You can also run `mcp-remote-go` using Docker, which provides a consistent envir
 docker pull ghcr.io/naotama2002/mcp-remote-go:latest
 
 # Or pull a specific version
-docker pull ghcr.io/naotama2002/mcp-remote-go:v0.1.1
+docker pull ghcr.io/naotama2002/mcp-remote-go:v0.1.3
 ```
 
 #### Build locally
