@@ -19,11 +19,15 @@ func TestNewCoordinator(t *testing.T) {
 	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// Set test home directory
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	serverURLHash := "test-server-hash"
 	callbackPort := 3334
@@ -172,11 +176,15 @@ func TestSaveAndLoadTokens(t *testing.T) {
 	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// Set test home directory
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {
@@ -224,11 +232,15 @@ func TestLoadTokensNotFound(t *testing.T) {
 	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// Set test home directory
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {
@@ -277,7 +289,9 @@ func TestExchangeCode(t *testing.T) {
 			}
 
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(response)
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			}
 		} else {
 			http.NotFound(w, r)
 		}
@@ -290,11 +304,15 @@ func TestExchangeCode(t *testing.T) {
 	// 元のホームディレクトリを保存し、テスト後に復元
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// テスト用のホームディレクトリを設定
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {
@@ -343,11 +361,15 @@ func TestExchangeCodeError(t *testing.T) {
 	// 元のホームディレクトリを保存し、テスト後に復元
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// テスト用のホームディレクトリを設定
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {
@@ -381,11 +403,15 @@ func TestExchangeCodeNotInitialized(t *testing.T) {
 	// 元のホームディレクトリを保存し、テスト後に復元
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// テスト用のホームディレクトリを設定
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {
@@ -410,11 +436,15 @@ func TestWaitForAuthCodeTimeout(t *testing.T) {
 	// 元のホームディレクトリを保存し、テスト後に復元
 	originalHome := os.Getenv("HOME")
 	defer func() {
-		os.Setenv("HOME", originalHome)
+		if err := os.Setenv("HOME", originalHome); err != nil {
+			t.Logf("Warning: failed to restore HOME: %v", err)
+		}
 	}()
 
 	// テスト用のホームディレクトリを設定
-	os.Setenv("HOME", tmpDir)
+	if err := os.Setenv("HOME", tmpDir); err != nil {
+		t.Fatalf("Failed to set HOME: %v", err)
+	}
 
 	coordinator, err := NewCoordinator("test-hash", 3334)
 	if err != nil {

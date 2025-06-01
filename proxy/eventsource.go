@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 )
@@ -67,14 +68,18 @@ func (es *EventSource) Connect() error {
 	// Check response code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
 		return fmt.Errorf("server returned error status: %d - %s", resp.StatusCode, string(body))
 	}
 
 	// Verify that the content type is text/event-stream
 	contentType := resp.Header.Get("Content-Type")
 	if contentType != "text/event-stream" {
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
 		return fmt.Errorf("expected content-type text/event-stream, got %s", contentType)
 	}
 
@@ -107,7 +112,9 @@ func (es *EventSource) Close() {
 
 	// Close the response body
 	if es.response != nil && es.response.Body != nil {
-		es.response.Body.Close()
+		if err := es.response.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
 	}
 
 	es.connected = false
@@ -119,7 +126,9 @@ func (es *EventSource) readEvents() {
 		es.mu.Lock()
 		es.connected = false
 		if es.response != nil && es.response.Body != nil {
-			es.response.Body.Close()
+			if err := es.response.Body.Close(); err != nil {
+				log.Printf("Warning: failed to close response body: %v", err)
+			}
 		}
 		es.mu.Unlock()
 	}()
@@ -173,8 +182,7 @@ func (es *EventSource) readEvents() {
 			data.Write(dataLine)
 		} else if bytes.HasPrefix(line, []byte("id:")) {
 			es.lastID = string(bytes.TrimSpace(line[3:]))
-		} else if bytes.HasPrefix(line, []byte("retry:")) {
-			// Parse retry time if needed
 		}
+		// Note: retry field is not currently implemented
 	}
 }

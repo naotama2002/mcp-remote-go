@@ -64,7 +64,10 @@ func TestEventSourceConnect(t *testing.T) {
 		}
 
 		// Send a simple event
-		w.Write([]byte("data: test message\n\n"))
+		if _, err := w.Write([]byte("data: test message\n\n")); err != nil {
+			http.Error(w, "Failed to write data", http.StatusInternalServerError)
+			return
+		}
 		flusher.Flush()
 
 		// Keep connection open for a short time
@@ -173,7 +176,10 @@ func TestEventSourceMessageHandling(t *testing.T) {
 		}
 
 		for _, event := range events {
-			w.Write([]byte(event))
+			if _, err := w.Write([]byte(event)); err != nil {
+				http.Error(w, "Failed to write event", http.StatusInternalServerError)
+				return
+			}
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -304,7 +310,9 @@ func TestEventSourceCallbacks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: test\n\n"))
+		if _, err := w.Write([]byte("data: test\n\n")); err != nil {
+			http.Error(w, "Failed to write data", http.StatusInternalServerError)
+		}
 	}))
 	defer server.Close()
 

@@ -43,6 +43,7 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 	// Create auth coordinator
 	authCoord, err := auth.NewCoordinator(serverURLHash, callbackPort)
 	if err != nil {
+		cancel() // リソースリークを防ぐためにcancelを呼び出す
 		return nil, fmt.Errorf("failed to create auth coordinator: %w", err)
 	}
 
@@ -287,7 +288,11 @@ func (p *Proxy) sendToServer(message string) error {
 	if err != nil {
 		return fmt.Errorf("POST request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -343,7 +348,9 @@ func (p *Proxy) handleServerMessage(event string, data []byte) {
 		log.Printf("Error writing to STDIO: %v", err)
 		return
 	}
-	p.stdioWriter.Flush()
+	if err := p.stdioWriter.Flush(); err != nil {
+		log.Printf("Error flushing STDIO: %v", err)
+	}
 }
 
 // handleServerError handles errors from the SSE connection
