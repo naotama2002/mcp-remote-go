@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -139,6 +141,26 @@ func (p *Proxy) getCommandURL() string {
 	return u.String()
 }
 
+// openBrowser opens the specified URL in the default browser
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+	case "darwin":
+		cmd = "open"
+		args = []string{url}
+	default: // "linux", "freebsd", "openbsd", "netbsd"
+		cmd = "xdg-open"
+		args = []string{url}
+	}
+
+	return exec.Command(cmd, args...).Start()
+}
+
 // connectToServer establishes a connection to the SSE server with authentication if needed
 func (p *Proxy) connectToServer() error {
 	// Create request with auth headers if available
@@ -193,6 +215,14 @@ func (p *Proxy) handleAuthentication() error {
 	}
 
 	log.Println("Please authorize access in your browser at:", authURL)
+
+	// 自動でブラウザを起動
+	if err := openBrowser(authURL); err != nil {
+		log.Printf("Failed to open browser automatically: %v", err)
+		log.Println("Please open the URL manually in your browser.")
+	} else {
+		log.Println("Opening browser...")
+	}
 
 	// Wait for auth code
 	code, err := p.authCoord.WaitForAuthCode()
@@ -294,7 +324,7 @@ func (p *Proxy) sendToServer(message string) error {
 		}
 	}()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned error status: %d - %s", resp.StatusCode, string(body))
 	}
