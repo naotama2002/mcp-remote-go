@@ -13,13 +13,13 @@ import (
 
 // EventSource provides a client for Server-Sent Events (SSE)
 type EventSource struct {
-	request    *http.Request
-	client     *http.Client
-	lastID     string
-	reconnect  bool
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
+	request   *http.Request
+	client    *http.Client
+	lastID    string
+	reconnect bool
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// Callbacks
 	OnOpen    func()
@@ -112,8 +112,6 @@ func (es *EventSource) Close() {
 
 	es.connected = false
 }
-
-
 
 // readEvents continuously reads SSE events
 func (es *EventSource) readEvents() {
