@@ -298,10 +298,10 @@ func TestExchangeCode(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// テスト用の一時ディレクトリを作成
+	// Create temporary directory for testing
 	tmpDir := t.TempDir()
 
-	// 元のホームディレクトリを保存し、テスト後に復元
+	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
 		if err := os.Setenv("HOME", originalHome); err != nil {
@@ -309,7 +309,7 @@ func TestExchangeCode(t *testing.T) {
 		}
 	}()
 
-	// テスト用のホームディレクトリを設定
+	// Set test home directory
 	if err := os.Setenv("HOME", tmpDir); err != nil {
 		t.Fatalf("Failed to set HOME: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestExchangeCode(t *testing.T) {
 		t.Fatalf("NewCoordinator failed: %v", err)
 	}
 
-	// テスト用のメタデータとクライアント情報を設定
+	// Set test metadata and client info
 	coordinator.serverMetadata = &ServerMetadata{
 		TokenEndpoint: server.URL + "/token",
 	}
@@ -349,16 +349,16 @@ func TestExchangeCode(t *testing.T) {
 }
 
 func TestExchangeCodeError(t *testing.T) {
-	// エラーを返すテストサーバー
+	// Test server that returns errors
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 	}))
 	defer server.Close()
 
-	// テスト用の一時ディレクトリを作成
+	// Create temporary directory for testing
 	tmpDir := t.TempDir()
 
-	// 元のホームディレクトリを保存し、テスト後に復元
+	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
 		if err := os.Setenv("HOME", originalHome); err != nil {
@@ -366,7 +366,7 @@ func TestExchangeCodeError(t *testing.T) {
 		}
 	}()
 
-	// テスト用のホームディレクトリを設定
+	// Set test home directory
 	if err := os.Setenv("HOME", tmpDir); err != nil {
 		t.Fatalf("Failed to set HOME: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestExchangeCodeError(t *testing.T) {
 		t.Fatalf("NewCoordinator failed: %v", err)
 	}
 
-	// テスト用のメタデータとクライアント情報を設定
+	// Set test metadata and client info
 	coordinator.serverMetadata = &ServerMetadata{
 		TokenEndpoint: server.URL + "/token",
 	}
@@ -385,7 +385,7 @@ func TestExchangeCodeError(t *testing.T) {
 		ClientSecret: "test-client-secret",
 	}
 
-	// 認証コードの交換（エラーになるはず）
+	// Exchange authorization code (should fail)
 	_, err = coordinator.ExchangeCode("invalid-code")
 	if err == nil {
 		t.Error("ExchangeCode should fail with invalid server response")
@@ -397,10 +397,10 @@ func TestExchangeCodeError(t *testing.T) {
 }
 
 func TestExchangeCodeNotInitialized(t *testing.T) {
-	// テスト用の一時ディレクトリを作成
+	// Create temporary directory for testing
 	tmpDir := t.TempDir()
 
-	// 元のホームディレクトリを保存し、テスト後に復元
+	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
 		if err := os.Setenv("HOME", originalHome); err != nil {
@@ -408,7 +408,7 @@ func TestExchangeCodeNotInitialized(t *testing.T) {
 		}
 	}()
 
-	// テスト用のホームディレクトリを設定
+	// Set test home directory
 	if err := os.Setenv("HOME", tmpDir); err != nil {
 		t.Fatalf("Failed to set HOME: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestExchangeCodeNotInitialized(t *testing.T) {
 		t.Fatalf("NewCoordinator failed: %v", err)
 	}
 
-	// 初期化されていない状態で認証コードを交換（エラーになるはず）
+	// Exchange authorization code in uninitialized state (should fail)
 	_, err = coordinator.ExchangeCode("test-code")
 	if err == nil {
 		t.Error("ExchangeCode should fail when not initialized")
@@ -430,10 +430,10 @@ func TestExchangeCodeNotInitialized(t *testing.T) {
 }
 
 func TestWaitForAuthCodeTimeout(t *testing.T) {
-	// テスト用の一時ディレクトリを作成
+	// Create temporary directory for testing
 	tmpDir := t.TempDir()
 
-	// 元のホームディレクトリを保存し、テスト後に復元
+	// Save original home directory and restore after test
 	originalHome := os.Getenv("HOME")
 	defer func() {
 		if err := os.Setenv("HOME", originalHome); err != nil {
@@ -441,7 +441,7 @@ func TestWaitForAuthCodeTimeout(t *testing.T) {
 		}
 	}()
 
-	// テスト用のホームディレクトリを設定
+	// Set test home directory
 	if err := os.Setenv("HOME", tmpDir); err != nil {
 		t.Fatalf("Failed to set HOME: %v", err)
 	}
@@ -451,21 +451,21 @@ func TestWaitForAuthCodeTimeout(t *testing.T) {
 		t.Fatalf("NewCoordinator failed: %v", err)
 	}
 
-	// このテストはタイムアウトを確認するため、短い時間で終了するようにモックするか
-	// 実際のタイムアウトを待つ代わりに、チャンネルが空の状態で即座にタイムアウトを模擬する
+	// This test verifies timeout behavior, so we mock it to complete in a short time
+	// instead of waiting for actual timeout, simulate immediate timeout with empty channel
 
-	// テスト開始
+	// Start test
 	done := make(chan struct{})
 	var authErr error
 
 	go func() {
 		defer close(done)
-		// 非常に短時間でタイムアウトするようにここでテストを調整
-		// 実際の実装では5分だが、テストでは待てないので、チャンネルから何も送信されないことを確認
+		// Adjust test to timeout very quickly here
+		// Actual implementation is 5 minutes, but we can't wait in tests, so verify nothing is sent from channel
 		select {
 		case <-coordinator.callbackChan:
 			authErr = nil
-		case <-time.After(100 * time.Millisecond): // テスト用に短い時間
+		case <-time.After(100 * time.Millisecond): // Short time for testing
 			authErr = errors.New("timeout waiting for authorization code")
 		}
 	}()
@@ -478,7 +478,7 @@ func TestWaitForAuthCodeTimeout(t *testing.T) {
 		if !strings.Contains(authErr.Error(), "timeout") {
 			t.Errorf("Error should contain 'timeout', got: %v", authErr)
 		}
-	case <-time.After(1 * time.Second): // テスト全体のタイムアウト
+	case <-time.After(1 * time.Second): // Overall test timeout
 		t.Error("Test should complete within 1 second")
 	}
 }
