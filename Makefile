@@ -14,10 +14,25 @@ VERSION?=dev
 # LDFLAGS
 LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildTime=${BUILD_TIME}"
 
-.PHONY: all build clean test check fmt lint vet
+.PHONY: all build clean test test-unit test-integration check fmt lint vet help
 
 # Default target
 all: clean check build
+
+# Show help
+help:
+	@echo "Available targets:"
+	@echo "  all            - Clean, check, and build"
+	@echo "  build          - Build the application"
+	@echo "  clean          - Clean build artifacts"
+	@echo "  test           - Run unit tests (safe for CI)"
+	@echo "  test-unit      - Run unit tests only"
+	@echo "  test-integration - Run all tests including browser tests"
+	@echo "  check          - Run all code checks (fmt, vet, lint)"
+	@echo "  fmt            - Format code"
+	@echo "  vet            - Run go vet"
+	@echo "  lint           - Run linter"
+	@echo "  help           - Show this help"
 
 # Build the application
 build:
@@ -33,10 +48,18 @@ clean:
 	@go clean
 	@echo "Clean complete"
 
-# Run tests
-test:
-	@echo "Running tests..."
+# Run unit tests (excludes browser tests that may open actual browsers)
+test-unit:
+	@echo "Running unit tests..."
+	go test -v ./... -short
+
+# Run all tests including integration tests (may open browsers)
+test-integration:
+	@echo "Running integration tests (may open browsers)..."
 	go test -v ./...
+
+# Run tests (defaults to unit tests for CI safety)
+test: test-unit
 
 # Run all checks (fmt, vet, lint)
 check: fmt vet lint
