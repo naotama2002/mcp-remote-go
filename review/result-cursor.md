@@ -105,7 +105,7 @@ func openBrowser(rawURL string) error {
 
 **良い点:**
 - トークンファイルは0600パーミッションで保存
-- トークンは`~/.mcp-auth/`ディレクトリに保存
+- トークンは`~/.mcp-remote-go-auth/`ディレクトリに保存
 - client_secretはオプション（なしでも動作可能）
 
 **改善点:**

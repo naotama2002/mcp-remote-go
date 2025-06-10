@@ -30,6 +30,6 @@ Thumbs.db
 *.swo
 
 # Local config files
-.mcp-auth/
+.mcp-remote-go-auth/
 
 /mcp-remote-ts/

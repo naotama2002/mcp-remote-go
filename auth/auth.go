@@ -460,14 +460,14 @@ func getConfigDir() string {
 		return dir
 	}
 
-	// Default to ~/.mcp-auth
+	// Default to ~/.mcp-remote-go-auth
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if home dir can't be determined
-		return ".mcp-auth"
+		return ".mcp-remote-go-auth"
 	}
 
-	return filepath.Join(homeDir, ".mcp-auth")
+	return filepath.Join(homeDir, ".mcp-remote-go-auth")
 }
 
 // getMetadataPath gets the path for server metadata
