@@ -11,13 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/naotama2002/mcp-remote-go/auth"
+	"github.com/pkg/browser"
 )
 
 // Proxy handles the bidirectional communication between stdio (MCP client) and the remote server
@@ -142,23 +141,20 @@ func (p *Proxy) getCommandURL() string {
 }
 
 // openBrowser opens the specified URL in the default browser
-func openBrowser(url string) error {
-	var cmd string
-	var args []string
-
-	switch runtime.GOOS {
-	case "windows":
-		cmd = "cmd"
-		args = []string{"/c", "start", url}
-	case "darwin":
-		cmd = "open"
-		args = []string{url}
-	default: // "linux", "freebsd", "openbsd", "netbsd"
-		cmd = "xdg-open"
-		args = []string{url}
+func openBrowser(rawURL string) error {
+	// URLの検証
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	return exec.Command(cmd, args...).Start()
+	// スキームの制限（HTTPとHTTPSのみ許可）
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return errors.New("only http and https URLs are allowed")
+	}
+
+	// github.com/pkg/browser を使用してブラウザを開く
+	return browser.OpenURL(rawURL)
 }
 
 // connectToServer establishes a connection to the SSE server with authentication if needed
