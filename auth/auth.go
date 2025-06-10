@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -87,19 +88,19 @@ func (c *Coordinator) InitializeAuth(serverURL string) (string, error) {
 	}
 	c.serverMetadata = metadata
 
-	// 2. Register client if needed
-	clientInfo, err := c.loadOrRegisterClient()
-	if err != nil {
-		return "", fmt.Errorf("client registration failed: %w", err)
-	}
-	c.clientInfo = clientInfo
-
-	// 3. Start callback server if not already running
+	// 2. Start callback server if not already running to find an available port
 	if c.callbackServer == nil {
 		if err := c.startCallbackServer(); err != nil {
 			return "", fmt.Errorf("failed to start callback server: %w", err)
 		}
 	}
+
+	// 3. Register client if needed (uses the potentially updated port)
+	clientInfo, err := c.loadOrRegisterClient()
+	if err != nil {
+		return "", fmt.Errorf("client registration failed: %w", err)
+	}
+	c.clientInfo = clientInfo
 
 	// 4. Generate authorization URL
 	authURL, err := c.buildAuthorizationURL()
@@ -285,7 +286,9 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	return &clientInfoResp, nil
 }
 
-// startCallbackServer starts the HTTP server to receive the OAuth callback
+// startCallbackServer starts the HTTP server to receive the OAuth callback.
+// It tries to find an available port, starting from the one configured,
+// and updates the coordinator's port to the one it successfully binds to.
 func (c *Coordinator) startCallbackServer() error {
 	mux := http.NewServeMux()
 
@@ -319,15 +322,33 @@ func (c *Coordinator) startCallbackServer() error {
 		}
 	})
 
+	// Find an available port and start the server
+	var listener net.Listener
+	var err error
+	basePort := c.callbackPort
+	for i := 0; i < 100; i++ { // Try up to 100 ports from the base port
+		port := basePort + i
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err = net.Listen("tcp", addr)
+		if err == nil {
+			c.callbackPort = port // Update to the successfully bound port
+			log.Printf("Callback server listening on %s", addr)
+			break
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("could not find an available port for callback server after 100 attempts: %w", err)
+	}
+
 	// Create server
 	c.callbackServer = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", c.callbackPort),
 		Handler: mux,
 	}
 
-	// Start the server
+	// Start the server in a goroutine
 	go func() {
-		if err := c.callbackServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := c.callbackServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("Callback server error: %v", err)
 		}
 	}()

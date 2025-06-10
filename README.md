@@ -224,7 +224,7 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
 
 ## Authentication
 
-The first time you connect to a server requiring authentication, you'll be prompted to open a URL in your browser to authorize access. The program will wait for you to complete the OAuth flow and then establish the connection.
+The first time you connect to a server requiring authentication, you'll be prompted to open a URL in your browser to authorize access. The program will wait for you to complete the OAuth flow and then establish the connection. The callback port for OAuth authentication will automatically use an available port if the default port is in use.
 
 Authorization tokens are stored in `~/.mcp-auth/` and will be reused for future connections.
 
