@@ -116,8 +116,20 @@ func TestBrowserIntegration(t *testing.T) {
 	}
 
 	// Skip if in CI environment (detected by common CI environment variables)
-	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" || os.Getenv("JENKINS_URL") != "" {
-		t.Skip("Skipping browser integration test in CI environment")
+	ciEnvVars := []string{
+		"CI", "GITHUB_ACTIONS", "JENKINS_URL", "GITLAB_CI",
+		"CIRCLECI", "TRAVIS", "BUILDKITE", "TEAMCITY_VERSION",
+		"BUILD_NUMBER", "CONTINUOUS_INTEGRATION",
+	}
+	for _, envVar := range ciEnvVars {
+		if os.Getenv(envVar) != "" {
+			t.Skip("Skipping browser integration test in CI environment")
+		}
+	}
+
+	// Skip if no display available (headless environment)
+	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		t.Skip("Skipping browser test: no display available")
 	}
 
 	// Test the integration of browser opening in the authentication flow
@@ -126,19 +138,24 @@ func TestBrowserIntegration(t *testing.T) {
 	testURL := "https://auth.example.com/oauth?client_id=test"
 
 	// Verify that openBrowser function exists and can be called
-	// In a real test environment, we might want to mock exec.Command
 	t.Run("browser function callable", func(t *testing.T) {
+		// Skip if explicitly disabled
+		if os.Getenv("SKIP_BROWSER_TEST") != "" {
+			t.Skip("Browser test skipped by SKIP_BROWSER_TEST environment variable")
+		}
+
 		// This test just verifies the function signature and basic functionality
-		// In a CI environment, this might fail if no display is available,
-		// so we'll just test that the function doesn't panic
 		defer func() {
 			if r := recover(); r != nil {
 				t.Errorf("openBrowser panicked: %v", r)
 			}
 		}()
 
-		// Call the function - it might fail in headless environments, but shouldn't panic
-		_ = openBrowser(testURL)
+		// Call the function - don't fail test if browser opening fails
+		err := openBrowser(testURL)
+		if err != nil {
+			t.Logf("Browser opening failed (expected in some environments): %v", err)
+		}
 	})
 }
 

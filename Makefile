@@ -25,9 +25,10 @@ help:
 	@echo "  all            - Clean, check, and build"
 	@echo "  build          - Build the application"
 	@echo "  clean          - Clean build artifacts"
-	@echo "  test           - Run unit tests (safe for CI)"
-	@echo "  test-unit      - Run unit tests only"
-	@echo "  test-integration - Run all tests including browser tests"
+	@echo "  test           - Run safe unit tests (excludes integration tests)"
+	@echo "  test-unit      - Run unit tests only (may include some integration tests)"
+	@echo "  test-unit-safe - Run only safe unit tests (excludes all integration tests)"
+	@echo "  test-integration - Run all tests including browser and integration tests"
 	@echo "  check          - Run all code checks (fmt, vet, lint)"
 	@echo "  fmt            - Format code"
 	@echo "  vet            - Run go vet"
@@ -59,7 +60,15 @@ test-integration:
 	go test -v ./...
 
 # Run tests (defaults to unit tests for CI safety)
-test: test-unit
+test: test-unit-safe
+
+# Run only safe unit tests (excludes integration tests)
+test-unit-safe:
+	@echo "Running safe unit tests..."
+	go test -v ./auth -short -skip "Integration|Concurrent|Callback"
+	go test -v ./proxy -short -skip "Integration|Concurrent|Graceful|Reconnection|ProxyConnection|ProxyWith|ProxyError|ProxySend|Browser"
+	go test -v ./cmd/mcp-remote-go -short
+	go test -v ./internal/... -short
 
 # Run all checks (fmt, vet, lint)
 check: fmt vet lint

@@ -39,6 +39,7 @@ func TestNewCoordinator(t *testing.T) {
 
 	if coordinator == nil {
 		t.Fatal("Coordinator should not be nil")
+		return
 	}
 
 	if coordinator.serverURLHash != serverURLHash {
