@@ -1,18 +1,21 @@
 package auth
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/naotama2002/mcp-remote-go/internal/filelock"
+	"github.com/naotama2002/mcp-remote-go/internal/httpclient"
 )
 
 // Tokens holds OAuth tokens
@@ -85,19 +88,19 @@ func (c *Coordinator) InitializeAuth(serverURL string) (string, error) {
 	}
 	c.serverMetadata = metadata
 
-	// 2. Register client if needed
-	clientInfo, err := c.loadOrRegisterClient()
-	if err != nil {
-		return "", fmt.Errorf("client registration failed: %w", err)
-	}
-	c.clientInfo = clientInfo
-
-	// 3. Start callback server if not already running
+	// 2. Start callback server if not already running to find an available port
 	if c.callbackServer == nil {
 		if err := c.startCallbackServer(); err != nil {
 			return "", fmt.Errorf("failed to start callback server: %w", err)
 		}
 	}
+
+	// 3. Register client if needed (uses the potentially updated port)
+	clientInfo, err := c.loadOrRegisterClient()
+	if err != nil {
+		return "", fmt.Errorf("client registration failed: %w", err)
+	}
+	c.clientInfo = clientInfo
 
 	// 4. Generate authorization URL
 	authURL, err := c.buildAuthorizationURL()
@@ -125,95 +128,89 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		return nil, errors.New("auth not initialized")
 	}
 
-	// Prepare request
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", c.callbackPort))
-	data.Set("client_id", c.clientInfo.ClientID)
+	// Prepare form data for token request
+	formData := map[string]string{
+		"grant_type":   "authorization_code",
+		"code":         code,
+		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
+		"client_id":    c.clientInfo.ClientID,
+	}
 
 	// Add client secret if available
 	if c.clientInfo.ClientSecret != "" {
-		data.Set("client_secret", c.clientInfo.ClientSecret)
+		formData["client_secret"] = c.clientInfo.ClientSecret
 	}
 
-	// Send token request
-	req, err := http.NewRequest(http.MethodPost, c.serverMetadata.TokenEndpoint, bytes.NewBufferString(data.Encode()))
+	// Create HTTP client and send request
+	client := httpclient.New(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := client.PostForm(ctx, c.serverMetadata.TokenEndpoint, formData, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
+		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	// Send request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token request failed: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-	}()
-
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read token response: %w", err)
-	}
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed: HTTP %d - %s", resp.StatusCode, string(body))
-	}
+	defer func() { _ = resp.SafeClose() }()
 
 	// Parse tokens
 	var tokens Tokens
-	if err := json.Unmarshal(body, &tokens); err != nil {
+	if err := resp.JSON(&tokens); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
 	return &tokens, nil
 }
 
-// LoadTokens loads tokens from disk
+// LoadTokens loads tokens from disk with file locking
 func (c *Coordinator) LoadTokens() (*Tokens, error) {
 	tokensPath := c.getTokensPath()
+	lock := filelock.New(tokensPath)
 
-	// Read file
-	data, err := os.ReadFile(tokensPath)
+	var tokens Tokens
+	err := lock.WithLock(5*time.Second, func() error {
+		// Read file
+		data, err := os.ReadFile(tokensPath)
+		if err != nil {
+			return err
+		}
+
+		// Parse tokens
+		if err := json.Unmarshal(data, &tokens); err != nil {
+			return fmt.Errorf("failed to parse tokens file: %w", err)
+		}
+
+		return nil
+	})
+
 	if err != nil {
 		return nil, err
-	}
-
-	// Parse tokens
-	var tokens Tokens
-	if err := json.Unmarshal(data, &tokens); err != nil {
-		return nil, fmt.Errorf("failed to parse tokens file: %w", err)
 	}
 
 	return &tokens, nil
 }
 
-// SaveTokens saves tokens to disk
+// SaveTokens saves tokens to disk with file locking
 func (c *Coordinator) SaveTokens(tokens *Tokens) error {
 	tokensPath := c.getTokensPath()
+	lock := filelock.New(tokensPath)
 
-	// Marshal tokens
-	data, err := json.MarshalIndent(tokens, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal tokens: %w", err)
-	}
+	return lock.WithLock(5*time.Second, func() error {
+		// Marshal tokens
+		data, err := json.MarshalIndent(tokens, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal tokens: %w", err)
+		}
 
-	// Write to file
-	if err := os.WriteFile(tokensPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write tokens file: %w", err)
-	}
+		// Write to file
+		if err := os.WriteFile(tokensPath, data, 0600); err != nil {
+			return fmt.Errorf("failed to write tokens file: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
-// discoverServerMetadata discovers OAuth server metadata
+// discoverServerMetadata discovers OAuth server metadata using multiple strategies
 func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata, error) {
 	// First try to load cached metadata
 	metadata, err := c.loadServerMetadata()
@@ -221,77 +218,22 @@ func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata,
 		return metadata, nil
 	}
 
-	// Construct the well-known URL
-	serverURLParsed, err := url.Parse(serverURL)
+	// Use the discovery service to find metadata
+	discoveryService := NewMetadataDiscoveryService()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	metadata, err = discoveryService.Discover(ctx, serverURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid server URL: %w", err)
+		return nil, fmt.Errorf("failed to discover server metadata: %w", err)
 	}
 
-	// Try to discover using standard OAuth 2.0 metadata endpoint
-	wellKnownURL := fmt.Sprintf("%s://%s/.well-known/oauth-authorization-server", serverURLParsed.Scheme, serverURLParsed.Host)
-	metadata, err = c.fetchServerMetadata(wellKnownURL)
-	if err == nil {
-		// Save metadata
-		if err := c.saveServerMetadata(metadata); err != nil {
-			log.Printf("Warning: failed to save server metadata: %v", err)
-		}
-		return metadata, nil
+	// Save discovered metadata
+	if err := c.saveServerMetadata(metadata); err != nil {
+		log.Printf("Warning: failed to save server metadata: %v", err)
 	}
 
-	// Fallback to OpenID Connect discovery
-	wellKnownURL = fmt.Sprintf("%s://%s/.well-known/openid-configuration", serverURLParsed.Scheme, serverURLParsed.Host)
-	metadata, err = c.fetchServerMetadata(wellKnownURL)
-	if err == nil {
-		// Save metadata
-		if err := c.saveServerMetadata(metadata); err != nil {
-			log.Printf("Warning: failed to save server metadata: %v", err)
-		}
-		return metadata, nil
-	}
-
-	// If all discovery methods fail, fallback to a common structure
-	fallbackMetadata := &ServerMetadata{
-		Issuer:                fmt.Sprintf("%s://%s", serverURLParsed.Scheme, serverURLParsed.Host),
-		AuthorizationEndpoint: fmt.Sprintf("%s://%s/oauth/authorize", serverURLParsed.Scheme, serverURLParsed.Host),
-		TokenEndpoint:         fmt.Sprintf("%s://%s/oauth/token", serverURLParsed.Scheme, serverURLParsed.Host),
-		RegistrationEndpoint:  fmt.Sprintf("%s://%s/oauth/register", serverURLParsed.Scheme, serverURLParsed.Host),
-	}
-
-	// Save this fallback metadata
-	if err := c.saveServerMetadata(fallbackMetadata); err != nil {
-		log.Printf("Warning: failed to save fallback server metadata: %v", err)
-	}
-
-	return fallbackMetadata, nil
-}
-
-// fetchServerMetadata fetches OAuth server metadata from a URL
-func (c *Coordinator) fetchServerMetadata(metadataURL string) (*ServerMetadata, error) {
-	resp, err := http.Get(metadataURL)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata response: %w", err)
-	}
-
-	var metadata ServerMetadata
-	if err := json.Unmarshal(body, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-
-	return &metadata, nil
+	return metadata, nil
 }
 
 // loadOrRegisterClient loads or registers a client
@@ -319,41 +261,20 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 		"grant_types":                []string{"authorization_code"},
 	}
 
-	reqBody, err := json.Marshal(regReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal client registration request: %w", err)
-	}
+	// Send registration request using httpclient
+	client := httpclient.New(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Send registration request
-	req, err := http.NewRequest(http.MethodPost, c.serverMetadata.RegistrationEndpoint, bytes.NewBuffer(reqBody))
+	resp, err := client.Post(ctx, c.serverMetadata.RegistrationEndpoint, regReq, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create registration request: %w", err)
+		return nil, fmt.Errorf("client registration failed: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("client registration request failed: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read registration response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("client registration failed: HTTP %d - %s", resp.StatusCode, string(body))
-	}
+	defer func() { _ = resp.SafeClose() }()
 
 	// Parse response
 	var clientInfoResp ClientInfo
-	if err := json.Unmarshal(body, &clientInfoResp); err != nil {
+	if err := resp.JSON(&clientInfoResp); err != nil {
 		return nil, fmt.Errorf("failed to parse client registration response: %w", err)
 	}
 
@@ -365,7 +286,9 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	return &clientInfoResp, nil
 }
 
-// startCallbackServer starts the HTTP server to receive the OAuth callback
+// startCallbackServer starts the HTTP server to receive the OAuth callback.
+// It tries to find an available port, starting from the one configured,
+// and updates the coordinator's port to the one it successfully binds to.
 func (c *Coordinator) startCallbackServer() error {
 	mux := http.NewServeMux()
 
@@ -399,15 +322,33 @@ func (c *Coordinator) startCallbackServer() error {
 		}
 	})
 
+	// Find an available port and start the server
+	var listener net.Listener
+	var err error
+	basePort := c.callbackPort
+	for i := 0; i < 100; i++ { // Try up to 100 ports from the base port
+		port := basePort + i
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err = net.Listen("tcp", addr)
+		if err == nil {
+			c.callbackPort = port // Update to the successfully bound port
+			log.Printf("Callback server listening on %s", addr)
+			break
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("could not find an available port for callback server after 100 attempts: %w", err)
+	}
+
 	// Create server
 	c.callbackServer = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", c.callbackPort),
 		Handler: mux,
 	}
 
-	// Start the server
+	// Start the server in a goroutine
 	go func() {
-		if err := c.callbackServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := c.callbackServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("Callback server error: %v", err)
 		}
 	}()
@@ -519,14 +460,14 @@ func getConfigDir() string {
 		return dir
 	}
 
-	// Default to ~/.mcp-auth
+	// Default to ~/.mcp-remote-go-auth
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if home dir can't be determined
-		return ".mcp-auth"
+		return ".mcp-remote-go-auth"
 	}
 
-	return filepath.Join(homeDir, ".mcp-auth")
+	return filepath.Join(homeDir, ".mcp-remote-go-auth")
 }
 
 // getMetadataPath gets the path for server metadata

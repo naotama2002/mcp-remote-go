@@ -20,6 +20,7 @@ func TestNewEventSource(t *testing.T) {
 
 	if es == nil {
 		t.Fatal("EventSource should not be nil")
+		return
 	}
 
 	if es.request == nil {

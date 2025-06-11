@@ -76,7 +76,7 @@ docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https:
 docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest http://internal.mcp.server/sse --allow-http
 
 # Mount auth directory to persist OAuth tokens
-docker run --rm -it -p 3334:3334 -v ~/.mcp-auth:/home/appuser/.mcp-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+docker run --rm -it -p 3334:3334 -v ~/.mcp-remote-go-auth:/home/appuser/.mcp-remote-go-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
 ```
 
 ## Configuration for MCP Clients
@@ -135,7 +135,7 @@ For persistent OAuth tokens with Docker:
         "-i",
         "--net=host",
         "-v",
-        "~/.mcp-auth:/home/appuser/.mcp-auth",
+        "~/.mcp-remote-go-auth:/home/appuser/.mcp-remote-go-auth",
         "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
       ]
@@ -224,9 +224,9 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
 
 ## Authentication
 
-The first time you connect to a server requiring authentication, you'll be prompted to open a URL in your browser to authorize access. The program will wait for you to complete the OAuth flow and then establish the connection.
+The first time you connect to a server requiring authentication, you'll be prompted to open a URL in your browser to authorize access. The program will wait for you to complete the OAuth flow and then establish the connection. The callback port for OAuth authentication will automatically use an available port if the default port is in use.
 
-Authorization tokens are stored in `~/.mcp-auth/` and will be reused for future connections.
+Authorization tokens are stored in `~/.mcp-remote-go-auth/` and will be reused for future connections.
 
 ## Troubleshooting
 
@@ -235,7 +235,7 @@ Authorization tokens are stored in `~/.mcp-auth/` and will be reused for future 
 If you're having issues with authentication, you can clear the stored data:
 
 ```bash
-rm -rf ~/.mcp-auth
+rm -rf ~/.mcp-remote-go-auth
 ```
 
 ### VPN/Certificate Issues
@@ -264,11 +264,11 @@ If you have permission issues when mounting the auth directory:
 
 ```bash
 # Make sure the directory exists and has proper permissions
-mkdir -p ~/.mcp-auth
-chmod 755 ~/.mcp-auth
+mkdir -p ~/.mcp-remote-go-auth
+chmod 755 ~/.mcp-remote-go-auth
 
 # Run with volume mount
-docker run --rm -it -p 3334:3334 -v ~/.mcp-auth:/home/appuser/.mcp-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
+docker run --rm -it -p 3334:3334 -v ~/.mcp-remote-go-auth:/home/appuser/.mcp-remote-go-auth ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
 ```
 
 #### Network Issues with MCP Clients
