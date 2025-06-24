@@ -18,11 +18,13 @@ func main() {
 	var serverURL string
 	var callbackPort int
 	var allowHTTP bool
+	var transportType string
 	var headers flagList
 
 	flag.StringVar(&serverURL, "server", "", "The MCP server URL to connect to")
 	flag.IntVar(&callbackPort, "port", 3334, "The callback port for OAuth")
 	flag.BoolVar(&allowHTTP, "allow-http", false, "Allow HTTP connections (only for trusted networks)")
+	flag.StringVar(&transportType, "transport", "sse", "Transport type: 'sse' or 'streamable-http'")
 	flag.Var(&headers, "header", "Custom header to include in requests (format: 'Key:Value')")
 	flag.Parse()
 
@@ -39,7 +41,8 @@ func main() {
 	}
 
 	if serverURL == "" {
-		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-header 'Key:Value'] ...")
+		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-transport <type>] [-allow-http] [-header 'Key:Value'] ...")
+		fmt.Println("Transport types: sse (default), streamable-http")
 		os.Exit(1)
 	}
 
@@ -57,11 +60,31 @@ func main() {
 		}
 	}
 
+	// Validate transport type
+	var transport proxy.TransportType
+	switch transportType {
+	case "sse":
+		transport = proxy.SSETransportType
+	case "streamable-http":
+		transport = proxy.StreamableHTTPTransportType
+	default:
+		log.Fatalf("Invalid transport type: %s. Valid types: sse, streamable-http", transportType)
+	}
+
 	// Get server URL hash for storage
 	serverURLHash := getServerURLHash(serverURL)
 
+	// Create transport config
+	config := &proxy.TransportConfig{
+		Type:          transport,
+		ServerURL:     serverURL,
+		Headers:       headerMap,
+		CallbackPort:  callbackPort,
+		ServerURLHash: serverURLHash,
+	}
+
 	// Create and start the proxy
-	p, err := proxy.NewProxy(serverURL, callbackPort, headerMap, serverURLHash)
+	p, err := proxy.NewProxy(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}

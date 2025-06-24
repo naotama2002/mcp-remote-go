@@ -6,7 +6,9 @@ This Go implementation allows MCP clients that only support local (stdio) connec
 
 MCP Remote proxies between:
 - A local MCP client using stdio transport
-- A remote MCP server using Server-Sent Events (SSE) with OAuth authentication
+- A remote MCP server using either:
+  - **Server-Sent Events (SSE)** with OAuth authentication (legacy)
+  - **Streamable HTTP** transport (MCP specification compliant)
 
 ## Installation
 
@@ -47,27 +49,45 @@ docker build -t mcp-remote-go .
 ### Binary Usage
 
 ```bash
-# Basic usage
+# Basic usage (SSE transport - default)
 mcp-remote-go https://remote.mcp.server/sse
 
+# Using Streamable HTTP transport (MCP specification)
+mcp-remote-go https://remote.mcp.server/mcp --transport streamable-http
+
 # With custom port for OAuth callback
-mcp-remote-go https://remote.mcp.server/sse 9090
+mcp-remote-go https://remote.mcp.server/sse --port 9090
 
 # With custom headers (useful for auth bypass or adding auth tokens)
 mcp-remote-go https://remote.mcp.server/sse --header "Authorization: Bearer YOUR_TOKEN"
 
 # Allow HTTP for trusted networks (normally HTTPS is required)
 mcp-remote-go http://internal.mcp.server/sse --allow-http
+
+# Combine options
+mcp-remote-go https://remote.mcp.server/mcp --transport streamable-http --port 9090 --header "Auth: Bearer token"
 ```
+
+### Transport Types
+
+- **`sse` (default)**: Legacy Server-Sent Events transport
+- **`streamable-http`**: MCP specification compliant Streamable HTTP transport with:
+  - Single endpoint for both POST and GET requests
+  - Session management with `Mcp-Session-Id` header
+  - Origin header validation for security
+  - Support for batch JSON-RPC requests
 
 ### Docker Usage
 
 ```bash
-# Basic usage with Docker
+# Basic usage with Docker (SSE transport)
 docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse
 
+# Using Streamable HTTP transport
+docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/mcp --transport streamable-http
+
 # With custom port for OAuth callback
-docker run --rm -it -p 9090:9090 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse 9090
+docker run --rm -it -p 9090:9090 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse --port 9090
 
 # With custom headers
 docker run --rm -it -p 3334:3334 ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/sse --header "Authorization: Bearer YOUR_TOKEN"
@@ -87,7 +107,7 @@ Edit the configuration file at:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### Using Binary
+#### Using Binary (SSE Transport)
 
 ```json
 {
@@ -102,7 +122,24 @@ Edit the configuration file at:
 }
 ```
 
-#### Using Docker
+#### Using Binary (Streamable HTTP Transport)
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "/path/to/mcp-remote-go",
+      "args": [
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
+      ]
+    }
+  }
+}
+```
+
+#### Using Docker (SSE Transport)
 
 ```json
 {
@@ -116,6 +153,28 @@ Edit the configuration file at:
         "--net=host",
         "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
+      ]
+    }
+  }
+}
+```
+
+#### Using Docker (Streamable HTTP Transport)
+
+```json
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
       ]
     }
   }
@@ -153,10 +212,18 @@ Edit the configuration file at `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "remote-example": {
+    "remote-example-sse": {
       "command": "/path/to/mcp-remote-go",
       "args": [
         "https://remote.mcp.server/sse"
+      ]
+    },
+    "remote-example-streamable": {
+      "command": "/path/to/mcp-remote-go",
+      "args": [
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
       ]
     }
   }
@@ -168,7 +235,7 @@ Edit the configuration file at `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "remote-example": {
+    "remote-example-sse": {
       "command": "docker",
       "args": [
         "run",
@@ -177,6 +244,19 @@ Edit the configuration file at `~/.cursor/mcp.json`:
         "--net=host",
         "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
+      ]
+    },
+    "remote-example-streamable": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
       ]
     }
   }
@@ -192,10 +272,18 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
 ```json
 {
   "mcpServers": {
-    "remote-example": {
+    "remote-example-sse": {
       "command": "/path/to/mcp-remote-go",
       "args": [
         "https://remote.mcp.server/sse"
+      ]
+    },
+    "remote-example-streamable": {
+      "command": "/path/to/mcp-remote-go",
+      "args": [
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
       ]
     }
   }
@@ -207,7 +295,7 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
 ```json
 {
   "mcpServers": {
-    "remote-example": {
+    "remote-example-sse": {
       "command": "docker",
       "args": [
         "run",
@@ -216,6 +304,19 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
         "--net=host",
         "ghcr.io/naotama2002/mcp-remote-go:latest",
         "https://remote.mcp.server/sse"
+      ]
+    },
+    "remote-example-streamable": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--net=host",
+        "ghcr.io/naotama2002/mcp-remote-go:latest",
+        "https://remote.mcp.server/mcp",
+        "--transport",
+        "streamable-http"
       ]
     }
   }
