@@ -29,7 +29,7 @@ func TestStreamableHTTPTransportSendJSON(t *testing.T) {
 		// Return JSON response
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(HeaderMCPSessionID, "test-session-123")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      1,
 			"result":  map[string]string{"status": "ok"},
@@ -84,10 +84,10 @@ func TestStreamableHTTPTransportSendSSEResponse(t *testing.T) {
 			return
 		}
 
-		fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"ok\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"ok\"}\n\n")
 		flusher.Flush()
 
-		fmt.Fprintf(w, "id: evt-42\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notify\"}\n\n")
+		_, _ = fmt.Fprintf(w, "id: evt-42\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notify\"}\n\n")
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -159,7 +159,7 @@ func TestStreamableHTTPTransportSessionPersistence(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(HeaderMCPSessionID, "session-abc")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
 	defer server.Close()
 
@@ -170,11 +170,11 @@ func TestStreamableHTTPTransportSessionPersistence(t *testing.T) {
 	transport.SetOnMessage(func(event string, data []byte) {})
 
 	// First request should have no session ID
-	transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
+	_ = transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
 	time.Sleep(50 * time.Millisecond)
 
 	// Second request should include the session ID
-	transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":2}`))
+	_ = transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":2}`))
 	time.Sleep(50 * time.Millisecond)
 
 	requestsMu.Lock()
@@ -205,7 +205,7 @@ func TestStreamableHTTPTransportClose(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(HeaderMCPSessionID, "session-xyz")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
 	defer server.Close()
 
@@ -216,7 +216,7 @@ func TestStreamableHTTPTransportClose(t *testing.T) {
 	transport.SetOnMessage(func(event string, data []byte) {})
 
 	// Send to establish session
-	transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
+	_ = transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
 	time.Sleep(50 * time.Millisecond)
 
 	// Close should send DELETE
@@ -239,7 +239,7 @@ func TestStreamableHTTPTransportAuthToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
 	defer server.Close()
 
@@ -252,7 +252,7 @@ func TestStreamableHTTPTransportAuthToken(t *testing.T) {
 	})
 	transport.SetOnMessage(func(event string, data []byte) {})
 
-	transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
+	_ = transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
 	time.Sleep(50 * time.Millisecond)
 
 	if receivedAuth != "Bearer my-secret-token" {
@@ -264,7 +264,7 @@ func TestStreamableHTTPTransportErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintf(w, `{"error":"internal"}`)
+		_, _ = fmt.Fprintf(w, `{"error":"internal"}`)
 	}))
 	defer server.Close()
 
@@ -288,7 +288,7 @@ func TestStreamableHTTPTransportCustomHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
 	defer server.Close()
 
@@ -301,7 +301,7 @@ func TestStreamableHTTPTransportCustomHeaders(t *testing.T) {
 	})
 	transport.SetOnMessage(func(event string, data []byte) {})
 
-	transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
+	_ = transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1}`))
 	time.Sleep(50 * time.Millisecond)
 
 	if receivedHeaders.Get("X-Custom-Header") != "custom-value" {
@@ -317,7 +317,7 @@ func TestStreamableHTTPTransportNotificationStream405(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 	}))
 	defer server.Close()
 
@@ -339,7 +339,7 @@ func TestStreamableHTTPTransportNotificationStream405(t *testing.T) {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	transport.Close()
+	_ = transport.Close()
 }
 
 func TestStreamableHTTPTransportE2E(t *testing.T) {
@@ -352,7 +352,7 @@ func TestStreamableHTTPTransportE2E(t *testing.T) {
 		case http.MethodPost:
 			body, _ := io.ReadAll(r.Body)
 			var msg map[string]interface{}
-			json.Unmarshal(body, &msg)
+			_ = json.Unmarshal(body, &msg)
 
 			sessionMu.Lock()
 			if sessionID == "" {
@@ -365,7 +365,7 @@ func TestStreamableHTTPTransportE2E(t *testing.T) {
 			switch method {
 			case "initialize":
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"jsonrpc": "2.0",
 					"id":      msg["id"],
 					"result": map[string]interface{}{
@@ -379,7 +379,7 @@ func TestStreamableHTTPTransportE2E(t *testing.T) {
 				})
 			case "tools/list":
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"jsonrpc": "2.0",
 					"id":      msg["id"],
 					"result": map[string]interface{}{

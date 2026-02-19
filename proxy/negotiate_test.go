@@ -16,7 +16,7 @@ func TestNegotiateTransportStreamableHTTP(t *testing.T) {
 		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set(HeaderMCPSessionID, "negotiate-session")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      0,
 				"result":  map[string]interface{}{},
@@ -68,10 +68,10 @@ func TestNegotiateTransportFallbackToSSE(t *testing.T) {
 				return
 			}
 
-			fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+			_, _ = fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
 			flusher.Flush()
 
-			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"ready\"}\n\n")
+			_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"ready\"}\n\n")
 			flusher.Flush()
 
 			<-r.Context().Done()
@@ -106,7 +106,7 @@ func TestNegotiateTransportFallbackOn405(t *testing.T) {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
-			fmt.Fprintf(w, "event: endpoint\ndata: /msg\n\n")
+			_, _ = fmt.Fprintf(w, "event: endpoint\ndata: /msg\n\n")
 			flusher.Flush()
 			<-r.Context().Done()
 		}
@@ -133,7 +133,7 @@ func TestTransportModeSSEDirect(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
-		fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\"}\n\n")
 		flusher.Flush()
 		<-r.Context().Done()
 	}))
@@ -163,7 +163,7 @@ func TestTransportModeStreamableHTTPDirect(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		case http.MethodPost:
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 		case http.MethodDelete:
 			w.WriteHeader(http.StatusOK)
 		}

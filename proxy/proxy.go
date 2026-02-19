@@ -171,8 +171,8 @@ func (p *Proxy) negotiateTransport() error {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	switch {
-	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusAccepted:
 		// Server supports Streamable HTTP
 		log.Println("Server supports Streamable HTTP transport")
 		if err := p.connectWithMode(TransportModeStreamableHTTP); err != nil {
@@ -184,13 +184,11 @@ func (p *Proxy) negotiateTransport() error {
 		}
 		return nil
 
-	case resp.StatusCode == http.StatusUnauthorized:
+	case http.StatusUnauthorized:
 		log.Println("Authentication required")
 		return p.handleAuthentication()
 
-	case resp.StatusCode == http.StatusBadRequest ||
-		resp.StatusCode == http.StatusNotFound ||
-		resp.StatusCode == http.StatusMethodNotAllowed:
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
 		// Server does not support Streamable HTTP, fall back to SSE
 		log.Printf("Server returned %d, falling back to SSE transport", resp.StatusCode)
 		return p.connectWithMode(TransportModeSSE)

@@ -22,11 +22,11 @@ func TestSSETransportConnect(t *testing.T) {
 		}
 
 		// Send endpoint event
-		fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
 		flusher.Flush()
 
 		// Send a message
-		fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1}\n\n")
 		flusher.Flush()
 
 		// Keep alive until client disconnects
@@ -47,7 +47,7 @@ func TestSSETransportConnect(t *testing.T) {
 	if err := transport.Connect(t.Context()); err != nil {
 		t.Fatalf("Connect failed: %v", err)
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	// Wait for message
 	select {
