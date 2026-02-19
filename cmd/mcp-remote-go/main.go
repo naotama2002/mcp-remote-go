@@ -18,11 +18,13 @@ func main() {
 	var serverURL string
 	var callbackPort int
 	var allowHTTP bool
+	var transportMode string
 	var headers flagList
 
 	flag.StringVar(&serverURL, "server", "", "The MCP server URL to connect to")
 	flag.IntVar(&callbackPort, "port", 3334, "The callback port for OAuth")
 	flag.BoolVar(&allowHTTP, "allow-http", false, "Allow HTTP connections (only for trusted networks)")
+	flag.StringVar(&transportMode, "transport", "auto", "Transport mode: auto, streamable-http, sse")
 	flag.Var(&headers, "header", "Custom header to include in requests (format: 'Key:Value')")
 	flag.Parse()
 
@@ -39,13 +41,22 @@ func main() {
 	}
 
 	if serverURL == "" {
-		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-header 'Key:Value'] ...")
+		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-header 'Key:Value'] ...")
 		os.Exit(1)
 	}
 
 	// Validate URL scheme
 	if !allowHTTP && !strings.HasPrefix(serverURL, "https://") {
 		log.Fatal("Error: Only HTTPS URLs are allowed. Use -allow-http for insecure connections.")
+	}
+
+	// Validate transport mode
+	mode := proxy.TransportMode(transportMode)
+	switch mode {
+	case proxy.TransportModeAuto, proxy.TransportModeStreamableHTTP, proxy.TransportModeSSE:
+		// valid
+	default:
+		log.Fatalf("Error: Invalid transport mode '%s'. Must be one of: auto, streamable-http, sse", transportMode)
 	}
 
 	// Convert headers to a map
@@ -61,7 +72,7 @@ func main() {
 	serverURLHash := getServerURLHash(serverURL)
 
 	// Create and start the proxy
-	p, err := proxy.NewProxy(serverURL, callbackPort, headerMap, serverURLHash)
+	p, err := proxy.NewProxyWithTransport(serverURL, callbackPort, headerMap, serverURLHash, mode)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}

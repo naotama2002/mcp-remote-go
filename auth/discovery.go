@@ -119,6 +119,73 @@ func (o *OpenIDConnectDiscovery) fetchMetadata(ctx context.Context, metadataURL 
 	return &metadata, nil
 }
 
+// ProtectedResourceMetadata holds RFC 9728 Protected Resource Metadata
+type ProtectedResourceMetadata struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported,omitempty"`
+}
+
+// ProtectedResourceDiscovery implements RFC 9728 Protected Resource Metadata discovery.
+// It fetches /.well-known/oauth-protected-resource from the resource server to find
+// the authorization server(s), then fetches OAuth metadata from those servers.
+type ProtectedResourceDiscovery struct {
+	client httpclient.Client
+}
+
+// NewProtectedResourceDiscovery creates a new RFC 9728 discovery strategy
+func NewProtectedResourceDiscovery(client httpclient.Client) *ProtectedResourceDiscovery {
+	return &ProtectedResourceDiscovery{client: client}
+}
+
+func (p *ProtectedResourceDiscovery) Name() string {
+	return "Protected Resource Metadata (RFC 9728)"
+}
+
+func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	// Fetch /.well-known/oauth-protected-resource
+	wellKnownURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", parsed.Scheme, parsed.Host)
+
+	resp, err := p.client.Get(ctx, wellKnownURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch protected resource metadata from %s: %w", wellKnownURL, err)
+	}
+	defer func() { _ = resp.SafeClose() }()
+
+	var prm ProtectedResourceMetadata
+	if err := resp.JSON(&prm); err != nil {
+		return nil, fmt.Errorf("failed to parse protected resource metadata from %s: %w", wellKnownURL, err)
+	}
+
+	if len(prm.AuthorizationServers) == 0 {
+		return nil, fmt.Errorf("no authorization_servers found in protected resource metadata")
+	}
+
+	// Try to discover OAuth metadata from each authorization server
+	for _, authServer := range prm.AuthorizationServers {
+		// Try RFC 8414 first
+		oauthDiscovery := NewStandardOAuthDiscovery(p.client)
+		metadata, err := oauthDiscovery.Discover(ctx, authServer)
+		if err == nil {
+			return metadata, nil
+		}
+
+		// Try OIDC discovery
+		oidcDiscovery := NewOpenIDConnectDiscovery(p.client)
+		metadata, err = oidcDiscovery.Discover(ctx, authServer)
+		if err == nil {
+			return metadata, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to discover OAuth metadata from any authorization server listed in protected resource metadata")
+}
+
 // FallbackDiscovery creates metadata based on common endpoint patterns
 type FallbackDiscovery struct{}
 
@@ -157,6 +224,7 @@ func (f *FallbackDiscovery) Discover(ctx context.Context, serverURL string) (*Se
 // Discover tries multiple discovery strategies in order
 func (m *MetadataDiscoveryService) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
 	strategies := []DiscoveryStrategy{
+		NewProtectedResourceDiscovery(m.client),
 		NewStandardOAuthDiscovery(m.client),
 		NewOpenIDConnectDiscovery(m.client),
 		NewFallbackDiscovery(),
