@@ -14,7 +14,6 @@ import (
 func TestProxyConnectionToServer(t *testing.T) {
 	// Create mock SSE server
 	sseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handle both root path and /events path for proxy connection
 		if r.URL.Path == "/" || r.URL.Path == "/events" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -26,7 +25,6 @@ func TestProxyConnectionToServer(t *testing.T) {
 				return
 			}
 
-			// Send test message
 			_, _ = fmt.Fprintf(w, "event: message\n")
 			_, _ = fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\n")
 			flusher.Flush()
@@ -36,7 +34,6 @@ func TestProxyConnectionToServer(t *testing.T) {
 	}))
 	defer sseServer.Close()
 
-	// Create proxy
 	headers := make(map[string]string)
 	proxy, err := NewProxy(sseServer.URL, 0, headers, "test-hash")
 	if err != nil {
@@ -44,13 +41,11 @@ func TestProxyConnectionToServer(t *testing.T) {
 	}
 	defer proxy.Shutdown()
 
-	// Test connection
 	err = proxy.connectToServer()
 	if err != nil {
 		t.Errorf("Failed to connect to server: %v", err)
 	}
 
-	// Give connection time to establish
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -58,10 +53,8 @@ func TestProxyConnectionToServer(t *testing.T) {
 func TestProxyWithAuthentication(t *testing.T) {
 	accessToken := "test-access-token-123"
 
-	// Create mock server that requires authentication
 	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "/events" {
-			// Check authorization header
 			auth := r.Header.Get("Authorization")
 			if auth != "Bearer "+accessToken {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -87,7 +80,6 @@ func TestProxyWithAuthentication(t *testing.T) {
 	}))
 	defer authServer.Close()
 
-	// Create proxy with authentication headers
 	headers := map[string]string{
 		"Authorization": "Bearer " + accessToken,
 	}
@@ -97,7 +89,6 @@ func TestProxyWithAuthentication(t *testing.T) {
 	}
 	defer proxy.Shutdown()
 
-	// Test authenticated connection
 	err = proxy.connectToServer()
 	if err != nil {
 		t.Errorf("Failed to connect with authentication: %v", err)
@@ -106,8 +97,8 @@ func TestProxyWithAuthentication(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
-// TestProxyCommandURL tests command URL resolution
-func TestProxyCommandURL(t *testing.T) {
+// TestSSETransportCommandURL tests command URL resolution via SSETransport
+func TestSSETransportCommandURL(t *testing.T) {
 	tests := []struct {
 		name            string
 		serverURL       string
@@ -136,18 +127,17 @@ func TestProxyCommandURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			headers := make(map[string]string)
-			proxy, err := NewProxy(tt.serverURL, 0, headers, "test-hash")
-			if err != nil {
-				t.Fatalf("Failed to create proxy: %v", err)
-			}
-			defer proxy.Shutdown()
+			transport := NewSSETransport(SSETransportConfig{
+				ServerURL: tt.serverURL,
+				Client:    &http.Client{},
+				Headers:   map[string]string{},
+			})
 
 			if tt.commandEndpoint != "" {
-				proxy.SetCommandEndpoint(tt.commandEndpoint)
+				transport.setCommandEndpoint(tt.commandEndpoint)
 			}
 
-			url := proxy.getCommandURL()
+			url := transport.getCommandURL()
 
 			if url != tt.expected {
 				t.Errorf("Expected URL %s, got %s", tt.expected, url)
@@ -182,7 +172,7 @@ func TestProxyErrorHandling(t *testing.T) {
 				}))
 			},
 			expectError: true,
-			errorType:   "401",
+			errorType:   "auth",
 		},
 		{
 			name: "invalid_content_type",
@@ -226,14 +216,12 @@ func TestProxyErrorHandling(t *testing.T) {
 	}
 }
 
-// TestProxySendToServer tests sending messages to the server
-func TestProxySendToServer(t *testing.T) {
+// TestSSETransportSendToServer tests sending messages via SSETransport
+func TestSSETransportSendToServer(t *testing.T) {
 	messageReceived := make(chan string, 1)
 
-	// Create mock server that captures sent messages
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/command" {
-			// Read the message
 			body := make([]byte, 1024)
 			n, _ := r.Body.Read(body)
 			messageReceived <- string(body[:n])
@@ -245,22 +233,21 @@ func TestProxySendToServer(t *testing.T) {
 	defer commandServer.Close()
 
 	headers := make(map[string]string)
-	proxy, err := NewProxy(commandServer.URL, 0, headers, "send-test-hash")
-	if err != nil {
-		t.Fatalf("Failed to create proxy: %v", err)
-	}
-	defer proxy.Shutdown()
 
-	proxy.SetCommandEndpoint(commandServer.URL + "/command")
+	// Create an SSE transport and set command endpoint directly
+	transport := NewSSETransport(SSETransportConfig{
+		ServerURL: commandServer.URL,
+		Client:    &http.Client{},
+		Headers:   headers,
+	})
+	transport.setCommandEndpoint(commandServer.URL + "/command")
 
-	// Send test message
 	testMessage := `{"jsonrpc":"2.0","id":1,"method":"test","params":{}}`
-	err = proxy.sendToServer(testMessage)
+	err := transport.Send(t.Context(), []byte(testMessage))
 	if err != nil {
 		t.Errorf("Failed to send message: %v", err)
 	}
 
-	// Verify message was received
 	select {
 	case received := <-messageReceived:
 		if !strings.Contains(received, "test") {
@@ -276,7 +263,6 @@ func TestConcurrentOperations(t *testing.T) {
 	messagesReceived := make(chan string, 20)
 	var receivedMux sync.Mutex
 
-	// Create server that handles multiple concurrent requests
 	concurrentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/command" {
 			body := make([]byte, 1024)
@@ -299,9 +285,14 @@ func TestConcurrentOperations(t *testing.T) {
 	}
 	defer proxy.Shutdown()
 
-	proxy.SetCommandEndpoint(concurrentServer.URL + "/command")
+	// Create an SSE transport with command endpoint set
+	transport := NewSSETransport(SSETransportConfig{
+		ServerURL: concurrentServer.URL,
+		Client:    proxy.client,
+		Headers:   headers,
+	})
+	transport.setCommandEndpoint(concurrentServer.URL + "/command")
 
-	// Send multiple messages concurrently
 	const numMessages = 10
 	var wg sync.WaitGroup
 	wg.Add(numMessages)
@@ -310,7 +301,7 @@ func TestConcurrentOperations(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			message := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"concurrent-test-%d","params":{}}`, id, id)
-			err := proxy.sendToServer(message)
+			err := transport.Send(proxy.ctx, []byte(message))
 			if err != nil {
 				t.Errorf("Failed to send message %d: %v", id, err)
 			}
@@ -319,7 +310,6 @@ func TestConcurrentOperations(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify all messages were received
 	receivedCount := 0
 	timeout := time.After(2 * time.Second)
 	for {
@@ -342,9 +332,8 @@ done:
 
 // TestGracefulShutdown tests proper resource cleanup during shutdown
 func TestGracefulShutdown(t *testing.T) {
-	// Create server with delayed responses
 	shutdownServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/events" {
+		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
@@ -355,7 +344,6 @@ func TestGracefulShutdown(t *testing.T) {
 				return
 			}
 
-			// Keep connection alive until context is cancelled
 			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
 
@@ -379,20 +367,16 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Fatalf("Failed to create proxy: %v", err)
 	}
 
-	// Start connection
 	err = proxy.connectToServer()
 	if err != nil {
-		t.Errorf("Failed to connect: %v", err)
+		t.Fatalf("Failed to connect: %v", err)
 	}
 
-	// Give connection time to establish
 	time.Sleep(200 * time.Millisecond)
 
-	// Test graceful shutdown
 	shutdownStart := time.Now()
 	proxy.Shutdown()
 
-	// Verify shutdown completes quickly
 	shutdownDuration := time.Since(shutdownStart)
 	if shutdownDuration > 1*time.Second {
 		t.Errorf("Shutdown took too long: %v", shutdownDuration)
@@ -404,21 +388,18 @@ func TestProxyReconnectionBehavior(t *testing.T) {
 	connectionAttempts := 0
 	var serverMux sync.Mutex
 
-	// Create server that fails first few attempts
 	reconnectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/events" {
+		if r.URL.Path == "/" {
 			serverMux.Lock()
 			connectionAttempts++
 			attempts := connectionAttempts
 			serverMux.Unlock()
 
-			// Fail first 2 connection attempts
 			if attempts <= 2 {
 				http.Error(w, "Server temporarily unavailable", http.StatusServiceUnavailable)
 				return
 			}
 
-			// Succeed on 3rd attempt
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
@@ -443,16 +424,13 @@ func TestProxyReconnectionBehavior(t *testing.T) {
 	}
 	defer proxy.Shutdown()
 
-	// Test multiple connection attempts
 	for i := 0; i < 3; i++ {
 		err = proxy.connectToServer()
 		if i < 2 {
-			// First 2 attempts should fail
 			if err == nil {
 				t.Errorf("Expected connection attempt %d to fail", i+1)
 			}
 		} else {
-			// 3rd attempt should succeed
 			if err != nil {
 				t.Errorf("Expected connection attempt %d to succeed, got: %v", i+1, err)
 			}
@@ -460,7 +438,6 @@ func TestProxyReconnectionBehavior(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Verify connection attempts
 	serverMux.Lock()
 	attempts := connectionAttempts
 	serverMux.Unlock()

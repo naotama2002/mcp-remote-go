@@ -19,32 +19,46 @@ import (
 	"github.com/pkg/browser"
 )
 
+// TransportMode specifies which transport to use.
+type TransportMode string
+
+const (
+	TransportModeAuto          TransportMode = "auto"
+	TransportModeStreamableHTTP TransportMode = "streamable-http"
+	TransportModeSSE           TransportMode = "sse"
+)
+
 // Proxy handles the bidirectional communication between stdio (MCP client) and the remote server
 type Proxy struct {
-	serverURL       string
-	callbackPort    int
-	headers         map[string]string
-	serverURLHash   string
-	authCoord       *auth.Coordinator
-	ctx             context.Context
-	cancel          context.CancelFunc
-	client          *http.Client
-	eventSource     *EventSource
-	stdioReader     *bufio.Reader
-	stdioWriter     *bufio.Writer
-	wg              sync.WaitGroup
-	commandEndpoint string     // MCP command endpoint URL
-	mu              sync.Mutex // ミューテックスをcommandEndpointの保護に使用
+	serverURL     string
+	callbackPort  int
+	headers       map[string]string
+	serverURLHash string
+	transportMode TransportMode
+	authCoord     *auth.Coordinator
+	ctx           context.Context
+	cancel        context.CancelFunc
+	client        *http.Client
+	transport     Transport
+	stdioReader   *bufio.Reader
+	stdioWriter   *bufio.Writer
+	writerMu      sync.Mutex
+	wg            sync.WaitGroup
 }
 
 // NewProxy creates a new MCP proxy
 func NewProxy(serverURL string, callbackPort int, headers map[string]string, serverURLHash string) (*Proxy, error) {
+	return NewProxyWithTransport(serverURL, callbackPort, headers, serverURLHash, TransportModeSSE)
+}
+
+// NewProxyWithTransport creates a new MCP proxy with a specified transport mode
+func NewProxyWithTransport(serverURL string, callbackPort int, headers map[string]string, serverURLHash string, mode TransportMode) (*Proxy, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create auth coordinator
 	authCoord, err := auth.NewCoordinator(serverURLHash, callbackPort)
 	if err != nil {
-		cancel() // リソースリークを防ぐためにcancelを呼び出す
+		cancel()
 		return nil, fmt.Errorf("failed to create auth coordinator: %w", err)
 	}
 
@@ -53,6 +67,7 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 		callbackPort:  callbackPort,
 		headers:       headers,
 		serverURLHash: serverURLHash,
+		transportMode: mode,
 		authCoord:     authCoord,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -65,20 +80,15 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 // Start initializes the proxy and begins bidirectional communication
 func (p *Proxy) Start() error {
 	log.Println("Starting MCP proxy")
-
-	// Connect to the SSE server
 	log.Println("Connecting to remote server:", p.serverURL)
 
-	// Try to connect, handle auth if needed
 	if err := p.connectToServer(); err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 
-	// Start processing messages from stdio
 	p.wg.Add(1)
 	go p.processStdioInput()
 
-	// Wait for completion
 	p.wg.Wait()
 	return nil
 }
@@ -86,125 +96,168 @@ func (p *Proxy) Start() error {
 // Shutdown gracefully stops the proxy
 func (p *Proxy) Shutdown() {
 	log.Println("Shutting down proxy")
-	if p.eventSource != nil {
-		p.eventSource.Close()
+	if p.transport != nil {
+		if err := p.transport.Close(); err != nil {
+			log.Printf("Warning: failed to close transport: %v", err)
+		}
 	}
 	p.cancel()
 	p.wg.Wait()
 }
 
-// getCommandURL converts the SSE URL to the command endpoint URL
-func (p *Proxy) getCommandURL() string {
-	commandURL := p.GetCommandEndpoint()
-	if commandURL != "" {
-		// ベースURLを抽出（スキーム+ホスト部分）
-		baseURL, err := url.Parse(p.serverURL)
-		if err != nil {
-			log.Printf("Failed to parse server URL: %v, using direct concatenation", err)
-			return p.serverURL + commandURL
-		}
+// getAuthToken returns the current auth token if available.
+func (p *Proxy) getAuthToken() string {
+	tokens, err := p.authCoord.LoadTokens()
+	if err == nil && tokens.AccessToken != "" {
+		return tokens.AccessToken
+	}
+	return ""
+}
 
-		// スキームとホストのみを取得（パスは除外）
-		baseURL.Path = ""
-
-		// ベースURLにcommandURLを結合
-		resultURL, err := url.Parse(baseURL.String())
-		if err != nil {
-			return resultURL.String() + commandURL // フォールバック
-		}
-
-		// commandURLが絶対URLなら、そのまま返す
-		if strings.HasPrefix(commandURL, "http://") || strings.HasPrefix(commandURL, "https://") {
-			return commandURL
-		}
-
-		// 相対URLなら、ベースURLと結合
-		relativeURL, err := url.Parse(commandURL)
-		if err != nil {
-			return baseURL.String() + commandURL // フォールバック
-		}
-
-		return baseURL.ResolveReference(relativeURL).String()
+// connectToServer establishes a connection using the configured transport
+func (p *Proxy) connectToServer() error {
+	if p.transportMode == TransportModeAuto {
+		return p.negotiateTransport()
 	}
 
-	// サーバーURLからベースURL（スキーム+ホスト）を抽出し、コマンドエンドポイントを作成
-	u, err := url.Parse(p.serverURL)
+	t := p.createTransport(p.transportMode)
+	t.SetOnMessage(p.handleServerMessage)
+	t.SetOnError(p.handleServerError)
+
+	err := t.Connect(p.ctx)
 	if err != nil {
-		// パース失敗時はフォールバック（元のURLに/messageを追加）
-		return p.serverURL + "/message"
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+			log.Println("Authentication required")
+			return p.handleAuthentication()
+		}
+		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	// ベースURLに/messageパスを設定（既存のパスは上書き）
-	u.Path = "/message"
+	p.transport = t
+	log.Println("Connected to server successfully")
+	return nil
+}
 
-	return u.String()
+// negotiateTransport attempts Streamable HTTP first, then falls back to SSE.
+func (p *Proxy) negotiateTransport() error {
+	log.Println("Auto-detecting transport...")
+
+	// Try Streamable HTTP first: send a POST probe to the server URL
+	probeReq, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":0}`))
+	if err != nil {
+		// If we can't even create the request, fall back to SSE
+		log.Printf("Failed to create probe request: %v, falling back to SSE", err)
+		return p.connectWithMode(TransportModeSSE)
+	}
+
+	for k, v := range p.headers {
+		probeReq.Header.Set(k, v)
+	}
+	if token := p.getAuthToken(); token != "" {
+		probeReq.Header.Set("Authorization", "Bearer "+token)
+	}
+	probeReq.Header.Set("Content-Type", "application/json")
+	probeReq.Header.Set("Accept", "application/json, text/event-stream")
+	probeReq.Header.Set(HeaderMCPProtocolVersion, MCPProtocolVersion)
+
+	resp, err := p.client.Do(probeReq)
+	if err != nil {
+		log.Printf("Streamable HTTP probe failed: %v, falling back to SSE", err)
+		return p.connectWithMode(TransportModeSSE)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); closeErr != nil {
+		log.Printf("Warning: failed to close probe response body: %v", closeErr)
+	}
+
+	// Check if response body looks like JSON-RPC (indicates Streamable HTTP support)
+	isJSONRPC := len(body) > 0 && json.Valid(body) && isJSONRPCResponse(body)
+
+	switch {
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
+		// Server supports Streamable HTTP
+		log.Println("Server supports Streamable HTTP transport")
+		return p.connectWithMode(TransportModeStreamableHTTP)
+
+	case resp.StatusCode == http.StatusUnauthorized:
+		log.Println("Authentication required")
+		return p.handleAuthentication()
+
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
+		// Server does not support Streamable HTTP, fall back to SSE
+		log.Printf("Server returned %d, falling back to SSE transport", resp.StatusCode)
+		return p.connectWithMode(TransportModeSSE)
+
+	case isJSONRPC:
+		// Server returned an error status but with a JSON-RPC body,
+		// which means it understands the protocol (Streamable HTTP)
+		log.Printf("Server returned %d with JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
+		return p.connectWithMode(TransportModeStreamableHTTP)
+
+	default:
+		log.Printf("Unexpected status %d from probe, falling back to SSE", resp.StatusCode)
+		return p.connectWithMode(TransportModeSSE)
+	}
+}
+
+// connectWithMode connects using a specific transport mode.
+func (p *Proxy) connectWithMode(mode TransportMode) error {
+	t := p.createTransport(mode)
+	t.SetOnMessage(p.handleServerMessage)
+	t.SetOnError(p.handleServerError)
+
+	err := t.Connect(p.ctx)
+	if err != nil {
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+			log.Println("Authentication required")
+			return p.handleAuthentication()
+		}
+		return fmt.Errorf("failed to connect with %s transport: %w", mode, err)
+	}
+
+	p.transport = t
+	p.transportMode = mode
+	log.Printf("Connected using %s transport", mode)
+	return nil
+}
+
+// createTransport creates the appropriate Transport for the given mode.
+func (p *Proxy) createTransport(mode TransportMode) Transport {
+	switch mode {
+	case TransportModeStreamableHTTP:
+		return NewStreamableHTTPTransport(StreamableHTTPTransportConfig{
+			Endpoint:     p.serverURL,
+			Client:       p.client,
+			Headers:      p.headers,
+			GetAuthToken: p.getAuthToken,
+		})
+	default: // SSE
+		return NewSSETransport(SSETransportConfig{
+			ServerURL:    p.serverURL,
+			Client:       p.client,
+			Headers:      p.headers,
+			GetAuthToken: p.getAuthToken,
+		})
+	}
 }
 
 // openBrowser opens the specified URL in the default browser
 func openBrowser(rawURL string) error {
-	// URLの検証
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// スキームの制限（HTTPとHTTPSのみ許可）
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
 		return errors.New("only http and https URLs are allowed")
 	}
 
-	// github.com/pkg/browser を使用してブラウザを開く
 	return browser.OpenURL(rawURL)
-}
-
-// connectToServer establishes a connection to the SSE server with authentication if needed
-func (p *Proxy) connectToServer() error {
-	// Create request with auth headers if available
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodGet, p.serverURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Add custom headers
-	for k, v := range p.headers {
-		req.Header.Set(k, v)
-	}
-
-	// Check for existing auth tokens
-	tokens, err := p.authCoord.LoadTokens()
-	if err == nil && tokens.AccessToken != "" {
-		log.Println("Using existing auth token")
-		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-	}
-
-	// Accept header for SSE
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Connection", "keep-alive")
-
-	// Create event source
-	p.eventSource = NewEventSource(req, p.client)
-	p.eventSource.OnMessage = p.handleServerMessage
-	p.eventSource.OnError = p.handleServerError
-
-	// Start the event source
-	err = p.eventSource.Connect()
-	if err != nil {
-		// Check if auth error
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
-			log.Println("Authentication required")
-			return p.handleAuthentication()
-		}
-		return fmt.Errorf("failed to connect to SSE: %w", err)
-	}
-
-	log.Println("Connected to SSE server successfully")
-	return nil
 }
 
 // handleAuthentication handles the OAuth flow
 func (p *Proxy) handleAuthentication() error {
-	// Initialize OAuth flow
 	authURL, err := p.authCoord.InitializeAuth(p.serverURL)
 	if err != nil {
 		return fmt.Errorf("failed to initialize auth: %w", err)
@@ -212,7 +265,6 @@ func (p *Proxy) handleAuthentication() error {
 
 	log.Println("Please authorize access in your browser at:", authURL)
 
-	// 自動でブラウザを起動
 	if err := openBrowser(authURL); err != nil {
 		log.Printf("Failed to open browser automatically: %v", err)
 		log.Println("Please open the URL manually in your browser.")
@@ -220,7 +272,6 @@ func (p *Proxy) handleAuthentication() error {
 		log.Println("Opening browser...")
 	}
 
-	// Wait for auth code
 	code, err := p.authCoord.WaitForAuthCode()
 	if err != nil {
 		return fmt.Errorf("auth code retrieval failed: %w", err)
@@ -228,18 +279,15 @@ func (p *Proxy) handleAuthentication() error {
 
 	log.Println("Auth code received, exchanging for tokens...")
 
-	// Get tokens
 	tokens, err := p.authCoord.ExchangeCode(code)
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
 
-	// Save tokens
 	if err := p.authCoord.SaveTokens(tokens); err != nil {
 		return fmt.Errorf("failed to save tokens: %w", err)
 	}
 
-	// Try connecting again with the new token
 	return p.connectToServer()
 }
 
@@ -252,7 +300,6 @@ func (p *Proxy) processStdioInput() {
 		case <-p.ctx.Done():
 			return
 		default:
-			// Read one line from stdin
 			line, err := p.stdioReader.ReadString('\n')
 			if err != nil {
 				if err == io.EOF {
@@ -264,7 +311,6 @@ func (p *Proxy) processStdioInput() {
 				continue
 			}
 
-			// Parse message to log method (but don't modify it)
 			var msg map[string]interface{}
 			if err := json.Unmarshal([]byte(line), &msg); err == nil {
 				if method, ok := msg["method"].(string); ok {
@@ -274,91 +320,23 @@ func (p *Proxy) processStdioInput() {
 				}
 			}
 
-			// Send message to server
-			if err := p.sendToServer(line); err != nil {
+			if p.transport == nil {
+				log.Printf("Error sending to server: not connected")
+				continue
+			}
+			if err := p.transport.Send(p.ctx, []byte(line)); err != nil {
 				log.Printf("Error sending to server: %v", err)
 			}
 		}
 	}
 }
 
-// sendToServer sends a message to the remote server
-func (p *Proxy) sendToServer(message string) error {
-	if p.eventSource == nil {
-		return errors.New("not connected to server")
-	}
-
-	commandURL := p.getCommandURL()
-
-	// Send message to command endpoint via HTTP POST
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, commandURL, strings.NewReader(message))
-	if err != nil {
-		return fmt.Errorf("failed to create POST request: %w", err)
-	}
-
-	// Add headers
-	for k, v := range p.headers {
-		req.Header.Set(k, v)
-	}
-
-	// Add auth header if we have a token
-	tokens, err := p.authCoord.LoadTokens()
-	if err == nil && tokens.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Send the request
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST request failed: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned error status: %d - %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// SetCommandEndpoint sets the command endpoint URL
-func (p *Proxy) SetCommandEndpoint(endpoint string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.commandEndpoint = endpoint
-}
-
-// GetCommandEndpoint returns the command endpoint URL
-func (p *Proxy) GetCommandEndpoint() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.commandEndpoint
-}
-
-// handleServerMessage processes messages received from the SSE server
+// handleServerMessage processes messages received from the server
 func (p *Proxy) handleServerMessage(event string, data []byte) {
-	// Handle special event types
-	if event == "endpoint" {
-		// MCPの仕様に基づき、サーバーが提供するcommandエンドポイントを保存
-		endpoint := string(data)
-		log.Printf("Received command endpoint: %s", endpoint)
-		p.SetCommandEndpoint(endpoint)
+	if event != "message" && event != "" {
 		return
 	}
 
-	if event != "message" {
-		// Handle other non-message events if needed
-		return
-	}
-
-	// Parse message to log method (but don't modify it)
 	var msg map[string]interface{}
 	if err := json.Unmarshal(data, &msg); err == nil {
 		if method, ok := msg["method"].(string); ok {
@@ -368,7 +346,14 @@ func (p *Proxy) handleServerMessage(event string, data []byte) {
 		}
 	}
 
-	// Forward message to stdout
+	p.writeToStdout(data)
+}
+
+// writeToStdout safely writes data to stdout with a newline.
+func (p *Proxy) writeToStdout(data []byte) {
+	p.writerMu.Lock()
+	defer p.writerMu.Unlock()
+
 	data = append(data, '\n')
 	if _, err := p.stdioWriter.Write(data); err != nil {
 		log.Printf("Error writing to STDIO: %v", err)
@@ -379,16 +364,14 @@ func (p *Proxy) handleServerMessage(event string, data []byte) {
 	}
 }
 
-// handleServerError handles errors from the SSE connection
+// handleServerError handles errors from the transport
 func (p *Proxy) handleServerError(err error) {
-	log.Printf("SSE error: %v", err)
+	log.Printf("Transport error: %v", err)
 
-	// If context is done, this is a normal shutdown
 	if errors.Is(err, context.Canceled) {
 		return
 	}
 
-	// If it's an auth error, try to re-authenticate
 	if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
 		log.Println("Authentication error, trying to re-authenticate...")
 		if err := p.handleAuthentication(); err != nil {
@@ -398,11 +381,35 @@ func (p *Proxy) handleServerError(err error) {
 		return
 	}
 
-	// For other errors, attempt to reconnect after a delay
 	time.Sleep(5 * time.Second)
 	log.Println("Attempting to reconnect...")
 	if err := p.connectToServer(); err != nil {
 		log.Printf("Reconnection failed: %v", err)
 		p.Shutdown()
 	}
+}
+
+// isJSONRPCResponse checks if the body looks like a JSON-RPC response.
+func isJSONRPCResponse(body []byte) bool {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false
+	}
+	_, hasJSONRPC := obj["jsonrpc"]
+	return hasJSONRPC
+}
+
+// SetCommandEndpoint sets the command endpoint URL (for backward compatibility in tests).
+func (p *Proxy) SetCommandEndpoint(endpoint string) {
+	if sseTransport, ok := p.transport.(*SSETransport); ok {
+		sseTransport.setCommandEndpoint(endpoint)
+	}
+}
+
+// GetCommandEndpoint returns the command endpoint URL (for backward compatibility in tests).
+func (p *Proxy) GetCommandEndpoint() string {
+	if sseTransport, ok := p.transport.(*SSETransport); ok {
+		return sseTransport.getCommandEndpointValue()
+	}
+	return ""
 }
