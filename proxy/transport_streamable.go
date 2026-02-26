@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,9 @@ import (
 	"sync"
 	"time"
 )
+
+// errNotificationStreamNotSupported indicates the server does not support GET notification streams.
+var errNotificationStreamNotSupported = errors.New("server does not support GET notification stream")
 
 const (
 	// MCPProtocolVersion is the protocol version for Streamable HTTP transport.
@@ -223,6 +227,9 @@ func (t *StreamableHTTPTransport) startNotificationStream(ctx context.Context) {
 				if notifyCtx.Err() != nil {
 					return
 				}
+				if errors.Is(err, errNotificationStreamNotSupported) {
+					return
+				}
 				log.Printf("Notification stream error: %v, reconnecting...", err)
 				select {
 				case <-notifyCtx.Done():
@@ -255,11 +262,13 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 	}
 
 	if resp.StatusCode == http.StatusMethodNotAllowed {
-		// Server does not support GET notification stream; that's OK
+		// Server does not support GET notification stream; stop trying
 		if err := resp.Body.Close(); err != nil {
 			log.Printf("Warning: failed to close response body: %v", err)
 		}
-		return nil
+		log.Println("Server does not support GET notification stream (405), notifications will arrive via POST responses")
+		// Return a sentinel error to stop the reconnection loop
+		return errNotificationStreamNotSupported
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -28,13 +28,43 @@ func main() {
 	flag.Var(&headers, "header", "Custom header to include in requests (format: 'Key:Value')")
 	flag.Parse()
 
-	// If server URL not provided as a flag, check if it's the first argument
-	if serverURL == "" && len(flag.Args()) > 0 {
-		serverURL = flag.Arg(0)
+	// Go's flag package stops parsing at the first non-flag argument.
+	// Re-parse remaining args to support flags after positional arguments,
+	// e.g.: mcp-remote-go https://server/mcp --transport streamable-http
+	remaining := flag.Args()
+	var positionalArgs []string
+	for i := 0; i < len(remaining); i++ {
+		arg := remaining[i]
+		switch {
+		case (arg == "--transport" || arg == "-transport") && i+1 < len(remaining):
+			transportMode = remaining[i+1]
+			i++
+		case strings.HasPrefix(arg, "--transport=") || strings.HasPrefix(arg, "-transport="):
+			transportMode = strings.SplitN(arg, "=", 2)[1]
+		case (arg == "--header" || arg == "-header") && i+1 < len(remaining):
+			headers = append(headers, remaining[i+1])
+			i++
+		case strings.HasPrefix(arg, "--header=") || strings.HasPrefix(arg, "-header="):
+			headers = append(headers, strings.SplitN(arg, "=", 2)[1])
+		case arg == "--allow-http" || arg == "-allow-http":
+			allowHTTP = true
+		case (arg == "--port" || arg == "-port") && i+1 < len(remaining):
+			if _, err := fmt.Sscanf(remaining[i+1], "%d", &callbackPort); err != nil {
+				log.Printf("Warning: failed to parse port: %v", err)
+			}
+			i++
+		default:
+			positionalArgs = append(positionalArgs, arg)
+		}
+	}
 
-		// If port is provided as second argument
-		if len(flag.Args()) > 1 {
-			if _, err := fmt.Sscanf(flag.Arg(1), "%d", &callbackPort); err != nil {
+	// If server URL not provided as a flag, check positional arguments
+	if serverURL == "" && len(positionalArgs) > 0 {
+		serverURL = positionalArgs[0]
+
+		// If port is provided as second positional argument
+		if len(positionalArgs) > 1 {
+			if _, err := fmt.Sscanf(positionalArgs[1], "%d", &callbackPort); err != nil {
 				log.Printf("Warning: failed to parse callback port: %v", err)
 			}
 		}

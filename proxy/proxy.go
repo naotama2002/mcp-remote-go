@@ -171,27 +171,29 @@ func (p *Proxy) negotiateTransport() error {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusAccepted:
+	// Check if response body looks like JSON-RPC (indicates Streamable HTTP support)
+	isJSONRPC := len(body) > 0 && json.Valid(body) && isJSONRPCResponse(body)
+
+	switch {
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
 		// Server supports Streamable HTTP
 		log.Println("Server supports Streamable HTTP transport")
-		if err := p.connectWithMode(TransportModeStreamableHTTP); err != nil {
-			return err
-		}
-		// Forward the probe response if it was a valid JSON response
-		if len(body) > 0 && json.Valid(body) {
-			p.writeToStdout(body)
-		}
-		return nil
+		return p.connectWithMode(TransportModeStreamableHTTP)
 
-	case http.StatusUnauthorized:
+	case resp.StatusCode == http.StatusUnauthorized:
 		log.Println("Authentication required")
 		return p.handleAuthentication()
 
-	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
 		// Server does not support Streamable HTTP, fall back to SSE
 		log.Printf("Server returned %d, falling back to SSE transport", resp.StatusCode)
 		return p.connectWithMode(TransportModeSSE)
+
+	case isJSONRPC:
+		// Server returned an error status but with a JSON-RPC body,
+		// which means it understands the protocol (Streamable HTTP)
+		log.Printf("Server returned %d with JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
+		return p.connectWithMode(TransportModeStreamableHTTP)
 
 	default:
 		log.Printf("Unexpected status %d from probe, falling back to SSE", resp.StatusCode)
@@ -385,6 +387,16 @@ func (p *Proxy) handleServerError(err error) {
 		log.Printf("Reconnection failed: %v", err)
 		p.Shutdown()
 	}
+}
+
+// isJSONRPCResponse checks if the body looks like a JSON-RPC response.
+func isJSONRPCResponse(body []byte) bool {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false
+	}
+	_, hasJSONRPC := obj["jsonrpc"]
+	return hasJSONRPC
 }
 
 // SetCommandEndpoint sets the command endpoint URL (for backward compatibility in tests).
