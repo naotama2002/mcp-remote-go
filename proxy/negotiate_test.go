@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -153,6 +155,93 @@ func TestTransportModeSSEDirect(t *testing.T) {
 	// Should remain SSE
 	if proxy.transportMode != TransportModeSSE {
 		t.Errorf("Expected SSE mode, got '%s'", proxy.transportMode)
+	}
+}
+
+func TestNegotiateTransportJSONRPCErrorBody(t *testing.T) {
+	// Server returns 400 with JSON-RPC error body — should detect as Streamable HTTP
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      0,
+				"error": map[string]interface{}{
+					"code":    -32600,
+					"message": "Must send initialize first",
+				},
+			})
+		case http.MethodGet:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "jsonrpc-error-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	err = proxy.connectToServer()
+	if err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if proxy.transportMode != TransportModeStreamableHTTP {
+		t.Errorf("Expected transport mode 'streamable-http' for JSON-RPC error body, got '%s'", proxy.transportMode)
+	}
+}
+
+func TestNegotiateTransportProbeResponseNotForwarded(t *testing.T) {
+	// Verify that the probe response is NOT written to stdout during auto-negotiation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      0,
+				"result":  map[string]interface{}{},
+			})
+		case http.MethodGet:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "probe-isolation-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	// Replace stdout with a buffer to capture any output
+	var stdoutBuf bytes.Buffer
+	proxy.SetStdio(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&stdoutBuf))
+
+	err = proxy.connectToServer()
+	if err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	// Wait for any async writes
+	time.Sleep(100 * time.Millisecond)
+
+	// The probe response should NOT have been written to stdout
+	if stdoutBuf.Len() > 0 {
+		t.Errorf("Probe response was forwarded to stdout (got %d bytes: %s), expected no output",
+			stdoutBuf.Len(), stdoutBuf.String())
+	}
+
+	if proxy.transportMode != TransportModeStreamableHTTP {
+		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.transportMode)
 	}
 }
 

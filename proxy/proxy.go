@@ -304,7 +304,15 @@ func (p *Proxy) processStdioInput() {
 			if err != nil {
 				if err == io.EOF {
 					log.Println("STDIO input closed")
-					p.Shutdown()
+					// Close transport and cancel context directly instead of calling
+					// Shutdown() to avoid deadlock (Shutdown calls wg.Wait, but this
+					// goroutine hasn't called wg.Done yet via defer).
+					if p.transport != nil {
+						if closeErr := p.transport.Close(); closeErr != nil {
+							log.Printf("Warning: failed to close transport: %v", closeErr)
+						}
+					}
+					p.cancel()
 					return
 				}
 				log.Printf("Error reading from STDIO: %v", err)
@@ -397,6 +405,12 @@ func isJSONRPCResponse(body []byte) bool {
 	}
 	_, hasJSONRPC := obj["jsonrpc"]
 	return hasJSONRPC
+}
+
+// SetStdio replaces the stdio reader and writer (for testing).
+func (p *Proxy) SetStdio(reader *bufio.Reader, writer *bufio.Writer) {
+	p.stdioReader = reader
+	p.stdioWriter = writer
 }
 
 // SetCommandEndpoint sets the command endpoint URL (for backward compatibility in tests).

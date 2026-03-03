@@ -29,46 +29,19 @@ func main() {
 	flag.Parse()
 
 	// Go's flag package stops parsing at the first non-flag argument.
-	// Re-parse remaining args to support flags after positional arguments,
-	// e.g.: mcp-remote-go https://server/mcp --transport streamable-http
-	remaining := flag.Args()
-	var positionalArgs []string
-	for i := 0; i < len(remaining); i++ {
-		arg := remaining[i]
-		switch {
-		case (arg == "--transport" || arg == "-transport") && i+1 < len(remaining):
-			transportMode = remaining[i+1]
-			i++
-		case strings.HasPrefix(arg, "--transport=") || strings.HasPrefix(arg, "-transport="):
-			transportMode = strings.SplitN(arg, "=", 2)[1]
-		case (arg == "--header" || arg == "-header") && i+1 < len(remaining):
-			headers = append(headers, remaining[i+1])
-			i++
-		case strings.HasPrefix(arg, "--header=") || strings.HasPrefix(arg, "-header="):
-			headers = append(headers, strings.SplitN(arg, "=", 2)[1])
-		case arg == "--allow-http" || arg == "-allow-http":
-			allowHTTP = true
-		case (arg == "--port" || arg == "-port") && i+1 < len(remaining):
-			if _, err := fmt.Sscanf(remaining[i+1], "%d", &callbackPort); err != nil {
-				log.Printf("Warning: failed to parse port: %v", err)
-			}
-			i++
-		default:
-			positionalArgs = append(positionalArgs, arg)
-		}
-	}
-
-	// If server URL not provided as a flag, check positional arguments
-	if serverURL == "" && len(positionalArgs) > 0 {
-		serverURL = positionalArgs[0]
-
-		// If port is provided as second positional argument
-		if len(positionalArgs) > 1 {
-			if _, err := fmt.Sscanf(positionalArgs[1], "%d", &callbackPort); err != nil {
-				log.Printf("Warning: failed to parse callback port: %v", err)
-			}
-		}
-	}
+	// Re-parse remaining args to support flags after positional arguments.
+	cfg := parseRemainingArgs(flag.Args(), cliConfig{
+		serverURL:     serverURL,
+		callbackPort:  callbackPort,
+		allowHTTP:     allowHTTP,
+		transportMode: transportMode,
+		headers:       []string(headers),
+	})
+	serverURL = cfg.serverURL
+	callbackPort = cfg.callbackPort
+	allowHTTP = cfg.allowHTTP
+	transportMode = cfg.transportMode
+	headers = flagList(cfg.headers)
 
 	if serverURL == "" {
 		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-header 'Key:Value'] ...")
@@ -140,4 +113,57 @@ func (f *flagList) String() string {
 func (f *flagList) Set(value string) error {
 	*f = append(*f, value)
 	return nil
+}
+
+// cliConfig holds parsed CLI configuration.
+type cliConfig struct {
+	serverURL     string
+	callbackPort  int
+	allowHTTP     bool
+	transportMode string
+	headers       []string
+}
+
+// parseRemainingArgs re-parses remaining args after flag.Parse() to support
+// flags after positional arguments (e.g.: mcp-remote-go https://server/mcp --transport streamable-http).
+func parseRemainingArgs(remaining []string, defaults cliConfig) cliConfig {
+	cfg := defaults
+	var positionalArgs []string
+
+	for i := 0; i < len(remaining); i++ {
+		arg := remaining[i]
+		switch {
+		case (arg == "--transport" || arg == "-transport") && i+1 < len(remaining):
+			cfg.transportMode = remaining[i+1]
+			i++
+		case strings.HasPrefix(arg, "--transport=") || strings.HasPrefix(arg, "-transport="):
+			cfg.transportMode = strings.SplitN(arg, "=", 2)[1]
+		case (arg == "--header" || arg == "-header") && i+1 < len(remaining):
+			cfg.headers = append(cfg.headers, remaining[i+1])
+			i++
+		case strings.HasPrefix(arg, "--header=") || strings.HasPrefix(arg, "-header="):
+			cfg.headers = append(cfg.headers, strings.SplitN(arg, "=", 2)[1])
+		case arg == "--allow-http" || arg == "-allow-http":
+			cfg.allowHTTP = true
+		case (arg == "--port" || arg == "-port") && i+1 < len(remaining):
+			if _, err := fmt.Sscanf(remaining[i+1], "%d", &cfg.callbackPort); err != nil {
+				log.Printf("Warning: failed to parse port: %v", err)
+			}
+			i++
+		default:
+			positionalArgs = append(positionalArgs, arg)
+		}
+	}
+
+	// If server URL not provided as a flag, check positional arguments
+	if cfg.serverURL == "" && len(positionalArgs) > 0 {
+		cfg.serverURL = positionalArgs[0]
+		if len(positionalArgs) > 1 {
+			if _, err := fmt.Sscanf(positionalArgs[1], "%d", &cfg.callbackPort); err != nil {
+				log.Printf("Warning: failed to parse callback port: %v", err)
+			}
+		}
+	}
+
+	return cfg
 }

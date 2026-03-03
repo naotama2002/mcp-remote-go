@@ -342,6 +342,146 @@ func TestStreamableHTTPTransportNotificationStream405(t *testing.T) {
 	_ = transport.Close()
 }
 
+func TestStreamableHTTPTransportNotificationStreamSuccess(t *testing.T) {
+	// Server that supports GET notification stream
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "SSE not supported", http.StatusInternalServerError)
+				return
+			}
+			// Send server-initiated notifications
+			_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/listChanged\"}\n\n")
+			flusher.Flush()
+			_, _ = fmt.Fprintf(w, "id: evt-100\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":50}}\n\n")
+			flusher.Flush()
+			// Keep connection open until cancelled
+			<-r.Context().Done()
+			return
+		}
+		// POST handler
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer server.Close()
+
+	var mu sync.Mutex
+	var received []string
+
+	transport := NewStreamableHTTPTransport(StreamableHTTPTransportConfig{
+		Endpoint: server.URL,
+		Client:   &http.Client{},
+	})
+	transport.SetOnMessage(func(event string, data []byte) {
+		mu.Lock()
+		received = append(received, string(data))
+		mu.Unlock()
+	})
+
+	err := transport.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// Wait for notification stream events to arrive
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	count := len(received)
+	mu.Unlock()
+
+	if count < 2 {
+		t.Fatalf("Expected at least 2 notification events from GET stream, got %d", count)
+	}
+
+	// Verify first notification
+	mu.Lock()
+	first := received[0]
+	mu.Unlock()
+	if !strings.Contains(first, "notifications/tools/listChanged") {
+		t.Errorf("Expected first notification to contain 'notifications/tools/listChanged', got: %s", first)
+	}
+
+	_ = transport.Close()
+}
+
+func TestStreamableHTTPTransportLastEventIDResumption(t *testing.T) {
+	var mu sync.Mutex
+	var lastEventIDReceived []string
+	connectionCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			lastEventIDReceived = append(lastEventIDReceived, r.Header.Get("Last-Event-ID"))
+			connectionCount++
+			connNum := connectionCount
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "SSE not supported", http.StatusInternalServerError)
+				return
+			}
+
+			if connNum == 1 {
+				// First connection: send events with IDs, then close
+				_, _ = fmt.Fprintf(w, "id: evt-1\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notify1\"}\n\n")
+				flusher.Flush()
+				_, _ = fmt.Fprintf(w, "id: evt-2\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notify2\"}\n\n")
+				flusher.Flush()
+				// Close the connection to trigger reconnect
+				return
+			}
+			// Second connection: keep open
+			_, _ = fmt.Fprintf(w, "id: evt-3\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notify3\"}\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer server.Close()
+
+	transport := NewStreamableHTTPTransport(StreamableHTTPTransportConfig{
+		Endpoint: server.URL,
+		Client:   &http.Client{},
+	})
+	transport.SetOnMessage(func(event string, data []byte) {})
+
+	err := transport.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// Wait for first connection events + reconnect + second connection
+	time.Sleep(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(lastEventIDReceived) < 2 {
+		t.Fatalf("Expected at least 2 GET connections, got %d", len(lastEventIDReceived))
+	}
+
+	// First connection should have no Last-Event-ID
+	if lastEventIDReceived[0] != "" {
+		t.Errorf("First connection should have empty Last-Event-ID, got '%s'", lastEventIDReceived[0])
+	}
+
+	// Second connection should have Last-Event-ID = "evt-2"
+	if lastEventIDReceived[1] != "evt-2" {
+		t.Errorf("Second connection should have Last-Event-ID 'evt-2', got '%s'", lastEventIDReceived[1])
+	}
+
+	_ = transport.Close()
+}
+
 func TestStreamableHTTPTransportE2E(t *testing.T) {
 	// Simulate a full MCP Streamable HTTP server
 	var sessionID string
