@@ -151,3 +151,51 @@ func TestProxyContext(t *testing.T) {
 		t.Error("Context should be cancelled")
 	}
 }
+
+func TestBuildHTTPClient_NoProxy(t *testing.T) {
+	client, err := buildHTTPClient("")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("Client should not be nil")
+	}
+	if client.Transport != nil {
+		t.Error("Transport should be nil (default) when no proxy is set")
+	}
+}
+
+func TestBuildHTTPClient_WithProxy(t *testing.T) {
+	client, err := buildHTTPClient("http://proxy.example.com:8080")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("Client should not be nil")
+	}
+	if client.Transport == nil {
+		t.Fatal("Transport should not be nil when proxy is set")
+	}
+}
+
+func TestBuildHTTPClient_InvalidProxyURL(t *testing.T) {
+	_, err := buildHTTPClient("://invalid")
+	if err == nil {
+		t.Error("Expected error for invalid proxy URL")
+	}
+}
+
+func TestNewProxyWithOptions_Proxy(t *testing.T) {
+	p, err := NewProxyWithOptions("https://example.com", 3334, map[string]string{}, "test-hash", TransportModeAuto, "http://proxy:8080")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer p.cancel()
+
+	if p.client == nil {
+		t.Fatal("HTTP client should not be nil")
+	}
+	if p.client.Transport == nil {
+		t.Fatal("HTTP transport should not be nil when proxy is configured")
+	}
+}

@@ -53,6 +53,11 @@ func NewProxy(serverURL string, callbackPort int, headers map[string]string, ser
 
 // NewProxyWithTransport creates a new MCP proxy with a specified transport mode
 func NewProxyWithTransport(serverURL string, callbackPort int, headers map[string]string, serverURLHash string, mode TransportMode) (*Proxy, error) {
+	return NewProxyWithOptions(serverURL, callbackPort, headers, serverURLHash, mode, "")
+}
+
+// NewProxyWithOptions creates a new MCP proxy with full configuration including HTTP proxy support
+func NewProxyWithOptions(serverURL string, callbackPort int, headers map[string]string, serverURLHash string, mode TransportMode, httpProxyURL string) (*Proxy, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create auth coordinator
@@ -60,6 +65,13 @@ func NewProxyWithTransport(serverURL string, callbackPort int, headers map[strin
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create auth coordinator: %w", err)
+	}
+
+	// Build HTTP client with optional proxy
+	httpClient, err := buildHTTPClient(httpProxyURL)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to configure HTTP proxy: %w", err)
 	}
 
 	return &Proxy{
@@ -71,9 +83,27 @@ func NewProxyWithTransport(serverURL string, callbackPort int, headers map[strin
 		authCoord:     authCoord,
 		ctx:           ctx,
 		cancel:        cancel,
-		client:        &http.Client{},
+		client:        httpClient,
 		stdioReader:   bufio.NewReader(os.Stdin),
 		stdioWriter:   bufio.NewWriter(os.Stdout),
+	}, nil
+}
+
+// buildHTTPClient creates an http.Client with optional proxy configuration.
+func buildHTTPClient(proxyURL string) (*http.Client, error) {
+	if proxyURL == "" {
+		return &http.Client{}, nil
+	}
+
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", proxyURL, err)
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(parsed),
+		},
 	}, nil
 }
 

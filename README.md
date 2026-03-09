@@ -20,6 +20,19 @@ MCP Remote proxies between:
 
 ## Installation
 
+### Desktop Extension (MCPB)
+
+Download the `.mcpb` file for your platform from [GitHub Releases](https://github.com/naotama2002/mcp-remote-go/releases):
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon) | `mcp-remote-go-darwin-arm64.mcpb` |
+| macOS (Intel) | `mcp-remote-go-darwin-amd64.mcpb` |
+| Windows (x64) | `mcp-remote-go-windows-amd64.mcpb` |
+| Windows (ARM64) | `mcp-remote-go-windows-arm64.mcpb` |
+
+Install by opening the `.mcpb` file in Claude Desktop. A configuration UI will appear where you can set the remote server URL and other options.
+
 ### Building from Source
 
 ```bash
@@ -74,6 +87,9 @@ mcp-remote-go https://remote.mcp.server/mcp --header "Authorization: Bearer YOUR
 
 # Allow HTTP for trusted networks (normally HTTPS is required)
 mcp-remote-go http://internal.mcp.server/mcp --allow-http
+
+# Via HTTP/HTTPS proxy
+mcp-remote-go https://remote.mcp.server/mcp --proxy http://proxy.example.com:8080
 ```
 
 ### Docker Usage
@@ -105,7 +121,20 @@ docker run --rm -it -p 3334:3334 -v ~/.mcp-remote-go-auth:/home/appuser/.mcp-rem
 
 By default, `mcp-remote-go` auto-detects the transport (Streamable HTTP or SSE). You can force a specific transport with the `--transport` flag.
 
-### Claude Desktop
+### Claude Desktop (MCPB Extension)
+
+The easiest way to use with Claude Desktop is via the `.mcpb` extension. After installing, configure through the GUI:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Remote MCP Server URL | The remote server URL (required) | — |
+| Transport Mode | `auto`, `streamable-http`, or `sse` | `auto` |
+| OAuth Callback Port | Local port for OAuth callback | `3334` |
+| Allow HTTP | Allow insecure HTTP connections | `false` |
+| HTTP/HTTPS Proxy | Proxy server URL (e.g. `http://proxy:8080`) | — |
+| Authorization Header | Auth header value (stored securely) | — |
+
+### Claude Desktop (Manual Configuration)
 
 Edit the configuration file at:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -245,6 +274,21 @@ Edit the configuration file at `~/.codeium/windsurf/mcp_config.json`:
   }
 }
 ```
+
+### Environment Variables
+
+All options can also be set via environment variables. CLI flags take precedence when both are set.
+
+| Variable | Description | Equivalent Flag |
+|----------|-------------|-----------------|
+| `MCP_SERVER_URL` | Remote MCP server URL | `--server` |
+| `MCP_TRANSPORT` | Transport mode (`auto`, `streamable-http`, `sse`) | `--transport` |
+| `MCP_PORT` | OAuth callback port | `--port` |
+| `MCP_ALLOW_HTTP` | Set to `true` to allow HTTP | `--allow-http` |
+| `MCP_PROXY` | HTTP/HTTPS proxy URL | `--proxy` |
+| `MCP_AUTH_HEADER` | Authorization header value | `--header "Authorization: ..."` |
+
+These environment variables are used internally by the MCPB extension to pass GUI-configured values to the binary.
 
 ## Authentication
 
