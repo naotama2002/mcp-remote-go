@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"testing"
 )
 
@@ -264,12 +263,12 @@ func TestApplyEnvOverrides_Port(t *testing.T) {
 }
 
 func TestApplyEnvOverrides_NoEnvVars(t *testing.T) {
-	os.Unsetenv("MCP_SERVER_URL")
-	os.Unsetenv("MCP_TRANSPORT")
-	os.Unsetenv("MCP_PORT")
-	os.Unsetenv("MCP_PROXY")
-	os.Unsetenv("MCP_ALLOW_HTTP")
-	os.Unsetenv("MCP_AUTH_HEADER")
+	t.Setenv("MCP_SERVER_URL", "")
+	t.Setenv("MCP_TRANSPORT", "")
+	t.Setenv("MCP_PORT", "")
+	t.Setenv("MCP_PROXY", "")
+	t.Setenv("MCP_ALLOW_HTTP", "")
+	t.Setenv("MCP_AUTH_HEADER", "")
 
 	serverURL := "https://original.com/mcp"
 	port := 3334
