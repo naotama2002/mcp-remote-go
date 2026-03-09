@@ -55,6 +55,7 @@ type Coordinator struct {
 	callbackServer *http.Server
 	clientInfo     *ClientInfo
 	serverMetadata *ServerMetadata
+	codeVerifier   string // PKCE code_verifier for current auth flow
 	authMutex      sync.Mutex
 	callbackChan   chan string
 }
@@ -134,6 +135,11 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		"code":         code,
 		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
 		"client_id":    c.clientInfo.ClientID,
+	}
+
+	// Add PKCE code_verifier
+	if c.codeVerifier != "" {
+		formData["code_verifier"] = c.codeVerifier
 	}
 
 	// Add client secret if available
@@ -356,11 +362,18 @@ func (c *Coordinator) startCallbackServer() error {
 	return nil
 }
 
-// buildAuthorizationURL builds the authorization URL
+// buildAuthorizationURL builds the authorization URL with PKCE (S256)
 func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	if c.serverMetadata == nil || c.clientInfo == nil {
 		return "", errors.New("auth not initialized")
 	}
+
+	// Generate PKCE code verifier
+	verifier, err := GenerateCodeVerifier()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate PKCE code verifier: %w", err)
+	}
+	c.codeVerifier = verifier
 
 	// Build params
 	params := url.Values{}
@@ -368,6 +381,8 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	params.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", c.callbackPort))
 	params.Set("response_type", "code")
 	params.Set("scope", "mcp offline_access")
+	params.Set("code_challenge", ComputeCodeChallenge(verifier))
+	params.Set("code_challenge_method", "S256")
 
 	// Combine URL
 	baseURL, err := url.Parse(c.serverMetadata.AuthorizationEndpoint)

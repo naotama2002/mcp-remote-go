@@ -199,6 +199,123 @@ func TestIndividualDiscoveryStrategies(t *testing.T) {
 	}
 }
 
+func TestProtectedResourceDiscovery(t *testing.T) {
+	// Create an authorization server
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-authorization-server" {
+			metadata := &ServerMetadata{
+				Issuer:                "https://auth.example.com",
+				AuthorizationEndpoint: "https://auth.example.com/authorize",
+				TokenEndpoint:         "https://auth.example.com/token",
+				RegistrationEndpoint:  "https://auth.example.com/register",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(metadata)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer authServer.Close()
+
+	// Create a resource server that points to the auth server
+	var resourceServerURL string
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			prm := &ProtectedResourceMetadata{
+				Resource:             resourceServerURL,
+				AuthorizationServers: []string{authServer.URL},
+				ScopesSupported:      []string{"mcp"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(prm)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	resourceServerURL = resourceServer.URL
+	defer resourceServer.Close()
+
+	service := NewMetadataDiscoveryService()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	metadata, err := service.Discover(ctx, resourceServer.URL)
+	if err != nil {
+		t.Fatalf("Protected Resource discovery failed: %v", err)
+	}
+
+	if metadata.Issuer != "https://auth.example.com" {
+		t.Errorf("Expected issuer 'https://auth.example.com', got %s", metadata.Issuer)
+	}
+	if metadata.AuthorizationEndpoint != "https://auth.example.com/authorize" {
+		t.Errorf("Expected auth endpoint 'https://auth.example.com/authorize', got %s", metadata.AuthorizationEndpoint)
+	}
+}
+
+func TestProtectedResourceDiscoveryFallback(t *testing.T) {
+	// Resource server returns protected resource metadata, but auth server is unreachable
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource":
+			prm := &ProtectedResourceMetadata{
+				Resource:             "https://example.com",
+				AuthorizationServers: []string{"https://unreachable.example.com"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(prm)
+		case "/.well-known/oauth-authorization-server":
+			http.NotFound(w, r)
+		case "/.well-known/openid-configuration":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewMetadataDiscoveryService()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Should fall through to fallback discovery
+	metadata, err := service.Discover(ctx, server.URL)
+	if err != nil {
+		t.Fatalf("Discovery should not fail (fallback should succeed): %v", err)
+	}
+
+	// Should get fallback metadata
+	if metadata.AuthorizationEndpoint == "" {
+		t.Error("Expected non-empty authorization endpoint from fallback")
+	}
+}
+
+func TestProtectedResourceDiscoveryNoAuthServers(t *testing.T) {
+	strategy := NewProtectedResourceDiscovery(*httpclient.New(nil))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/oauth-protected-resource" {
+			prm := &ProtectedResourceMetadata{
+				Resource:             "https://example.com",
+				AuthorizationServers: []string{}, // empty
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(prm)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := strategy.Discover(ctx, server.URL)
+	if err == nil {
+		t.Error("Expected error for empty authorization_servers")
+	}
+	if !strings.Contains(err.Error(), "no authorization_servers") {
+		t.Errorf("Expected 'no authorization_servers' error, got: %v", err)
+	}
+}
+
 func TestFallbackDiscoveryAlwaysSucceeds(t *testing.T) {
 	fallback := NewFallbackDiscovery()
 	ctx := context.Background()
