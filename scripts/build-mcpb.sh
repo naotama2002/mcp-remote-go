@@ -69,7 +69,7 @@ for platform in "${PLATFORMS[@]}"; do
       ],
       "env": {
         "MCP_ALLOW_HTTP": "\${user_config.allow_http}",
-        "MCP_PROXY": "\${user_config.http_proxy}",
+        "MCP_HTTPS_PROXY": "\${user_config.http_proxy}",
         "MCP_AUTH_HEADER": "\${user_config.auth_header}"
       }
     }

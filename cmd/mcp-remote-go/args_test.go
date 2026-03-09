@@ -266,7 +266,7 @@ func TestApplyEnvOverrides_NoEnvVars(t *testing.T) {
 	t.Setenv("MCP_SERVER_URL", "")
 	t.Setenv("MCP_TRANSPORT", "")
 	t.Setenv("MCP_PORT", "")
-	t.Setenv("MCP_PROXY", "")
+	t.Setenv("MCP_HTTPS_PROXY", "")
 	t.Setenv("MCP_ALLOW_HTTP", "")
 	t.Setenv("MCP_AUTH_HEADER", "")
 
@@ -321,7 +321,7 @@ func TestParseRemainingArgs_ProxyEqualsForm(t *testing.T) {
 }
 
 func TestApplyEnvOverrides_Proxy(t *testing.T) {
-	t.Setenv("MCP_PROXY", "http://env-proxy:8080")
+	t.Setenv("MCP_HTTPS_PROXY", "http://env-proxy:8080")
 
 	serverURL := ""
 	port := 3334
@@ -338,7 +338,7 @@ func TestApplyEnvOverrides_Proxy(t *testing.T) {
 }
 
 func TestApplyEnvOverrides_ProxyCLITakesPrecedence(t *testing.T) {
-	t.Setenv("MCP_PROXY", "http://env-proxy:8080")
+	t.Setenv("MCP_HTTPS_PROXY", "http://env-proxy:8080")
 
 	serverURL := ""
 	port := 3334

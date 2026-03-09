@@ -196,7 +196,7 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 			log.Printf("Warning: failed to parse MCP_PORT: %v", err)
 		}
 	}
-	if v := os.Getenv("MCP_PROXY"); v != "" && *httpProxy == "" {
+	if v := os.Getenv("MCP_HTTPS_PROXY"); v != "" && *httpProxy == "" {
 		*httpProxy = v
 	}
 	if os.Getenv("MCP_ALLOW_HTTP") == "true" {
