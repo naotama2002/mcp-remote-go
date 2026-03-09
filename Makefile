@@ -14,7 +14,11 @@ VERSION?=dev
 # LDFLAGS
 LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildTime=${BUILD_TIME}"
 
-.PHONY: all build clean test test-unit test-integration check fmt lint vet help
+# MCPB targets
+MCPB_DIR=${BUILD_DIR}/mcpb
+MCPB_PLATFORMS=darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+
+.PHONY: all build clean test test-unit test-integration check fmt lint vet mcpb help
 
 # Default target
 all: clean check build
@@ -33,6 +37,7 @@ help:
 	@echo "  fmt            - Format code"
 	@echo "  vet            - Run go vet"
 	@echo "  lint           - Run linter"
+	@echo "  mcpb           - Build .mcpb bundles for all platforms"
 	@echo "  help           - Show this help"
 
 # Build the application
@@ -82,6 +87,10 @@ fmt:
 vet:
 	@echo "Running go vet..."
 	go vet ./...
+
+# Build .mcpb bundles for all platforms
+mcpb:
+	@VERSION=${VERSION} ./scripts/build-mcpb.sh
 
 # Run linter (requires golangci-lint)
 lint:

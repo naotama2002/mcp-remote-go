@@ -15,9 +15,7 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: windows
-        goarch: arm64
+    # Windows arm64 is now supported for .mcpb bundles
 
 archives:
   - format: tar.gz

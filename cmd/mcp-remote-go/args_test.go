@@ -172,3 +172,223 @@ func TestParseRemainingArgs_SingleDashFlags(t *testing.T) {
 		t.Errorf("Expected transport mode 'streamable-http', got '%s'", cfg.transportMode)
 	}
 }
+
+func TestApplyEnvOverrides_ServerURL(t *testing.T) {
+	t.Setenv("MCP_SERVER_URL", "https://env.example.com/mcp")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if serverURL != "https://env.example.com/mcp" {
+		t.Errorf("Expected server URL from env, got '%s'", serverURL)
+	}
+}
+
+func TestApplyEnvOverrides_CLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_SERVER_URL", "https://env.example.com/mcp")
+	t.Setenv("MCP_TRANSPORT", "sse")
+
+	serverURL := "https://cli.example.com/mcp"
+	port := 3334
+	allowHTTP := false
+	transport := "streamable-http"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if serverURL != "https://cli.example.com/mcp" {
+		t.Errorf("CLI server URL should take precedence, got '%s'", serverURL)
+	}
+	if transport != "streamable-http" {
+		t.Errorf("CLI transport should take precedence, got '%s'", transport)
+	}
+}
+
+func TestApplyEnvOverrides_AllowHTTP(t *testing.T) {
+	t.Setenv("MCP_ALLOW_HTTP", "true")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if !allowHTTP {
+		t.Error("Expected allowHTTP to be true from env")
+	}
+}
+
+func TestApplyEnvOverrides_AuthHeader(t *testing.T) {
+	t.Setenv("MCP_AUTH_HEADER", "Bearer secret-token")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 || headers[0] != "Authorization:Bearer secret-token" {
+		t.Errorf("Expected Authorization header, got %v", headers)
+	}
+}
+
+func TestApplyEnvOverrides_Port(t *testing.T) {
+	t.Setenv("MCP_PORT", "9090")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if port != 9090 {
+		t.Errorf("Expected port 9090 from env, got %d", port)
+	}
+}
+
+func TestApplyEnvOverrides_NoEnvVars(t *testing.T) {
+	t.Setenv("MCP_SERVER_URL", "")
+	t.Setenv("MCP_TRANSPORT", "")
+	t.Setenv("MCP_PORT", "")
+	t.Setenv("MCP_HTTPS_PROXY", "")
+	t.Setenv("MCP_ALLOW_HTTP", "")
+	t.Setenv("MCP_AUTH_HEADER", "")
+
+	serverURL := "https://original.com/mcp"
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	headers := flagList{}
+
+	httpProxy := ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if serverURL != "https://original.com/mcp" {
+		t.Errorf("Server URL should be unchanged, got '%s'", serverURL)
+	}
+	if port != 3334 {
+		t.Errorf("Port should be unchanged, got %d", port)
+	}
+	if allowHTTP {
+		t.Error("allowHTTP should be false")
+	}
+	if transport != "auto" {
+		t.Errorf("Transport should be unchanged, got '%s'", transport)
+	}
+	if len(headers) != 0 {
+		t.Errorf("Headers should be empty, got %v", headers)
+	}
+}
+
+func TestParseRemainingArgs_HttpsProxyAfterURL(t *testing.T) {
+	remaining := []string{"https://example.com/mcp", "--https-proxy", "http://proxy:8080"}
+	cfg := parseRemainingArgs(remaining, cliConfig{
+		callbackPort:  3334,
+		transportMode: "auto",
+	})
+
+	if cfg.httpProxy != "http://proxy:8080" {
+		t.Errorf("Expected proxy 'http://proxy:8080', got '%s'", cfg.httpProxy)
+	}
+}
+
+func TestParseRemainingArgs_HttpsProxyEqualsForm(t *testing.T) {
+	remaining := []string{"https://example.com/mcp", "--https-proxy=http://proxy:3128"}
+	cfg := parseRemainingArgs(remaining, cliConfig{
+		callbackPort:  3334,
+		transportMode: "auto",
+	})
+
+	if cfg.httpProxy != "http://proxy:3128" {
+		t.Errorf("Expected proxy 'http://proxy:3128', got '%s'", cfg.httpProxy)
+	}
+}
+
+func TestApplyEnvOverrides_Proxy(t *testing.T) {
+	t.Setenv("MCP_HTTPS_PROXY", "http://env-proxy:8080")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if httpProxy != "http://env-proxy:8080" {
+		t.Errorf("Expected proxy from env, got '%s'", httpProxy)
+	}
+}
+
+func TestApplyEnvOverrides_ProxyCLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_HTTPS_PROXY", "http://env-proxy:8080")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := "http://cli-proxy:3128"
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if httpProxy != "http://cli-proxy:3128" {
+		t.Errorf("CLI proxy should take precedence, got '%s'", httpProxy)
+	}
+}
+
+func TestApplyEnvOverrides_AllowHTTPCLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_ALLOW_HTTP", "true")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := true // already set by CLI
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	// Should remain true (CLI already set it)
+	if !allowHTTP {
+		t.Error("allowHTTP should remain true")
+	}
+}
+
+func TestApplyEnvOverrides_AuthHeaderCLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_AUTH_HEADER", "Bearer env-token")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{"Authorization:Bearer cli-token"}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	// Should not add duplicate Authorization header
+	if len(headers) != 1 {
+		t.Errorf("Expected 1 header (CLI takes precedence), got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization:Bearer cli-token" {
+		t.Errorf("Expected CLI auth header, got '%s'", headers[0])
+	}
+}
