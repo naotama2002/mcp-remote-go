@@ -353,3 +353,42 @@ func TestApplyEnvOverrides_ProxyCLITakesPrecedence(t *testing.T) {
 		t.Errorf("CLI proxy should take precedence, got '%s'", httpProxy)
 	}
 }
+
+func TestApplyEnvOverrides_AllowHTTPCLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_ALLOW_HTTP", "true")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := true // already set by CLI
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	// Should remain true (CLI already set it)
+	if !allowHTTP {
+		t.Error("allowHTTP should remain true")
+	}
+}
+
+func TestApplyEnvOverrides_AuthHeaderCLITakesPrecedence(t *testing.T) {
+	t.Setenv("MCP_AUTH_HEADER", "Bearer env-token")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{"Authorization:Bearer cli-token"}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	// Should not add duplicate Authorization header
+	if len(headers) != 1 {
+		t.Errorf("Expected 1 header (CLI takes precedence), got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization:Bearer cli-token" {
+		t.Errorf("Expected CLI auth header, got '%s'", headers[0])
+	}
+}

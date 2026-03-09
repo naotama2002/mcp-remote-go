@@ -14,7 +14,16 @@ import (
 	"github.com/naotama2002/mcp-remote-go/proxy"
 )
 
+// Build-time variables set via -ldflags.
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
+	log.Printf("mcp-remote-go version=%s commit=%s built=%s", version, gitCommit, buildTime)
+
 	var serverURL string
 	var callbackPort int
 	var allowHTTP bool
@@ -199,10 +208,19 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 	if v := os.Getenv("MCP_HTTPS_PROXY"); v != "" && *httpProxy == "" {
 		*httpProxy = v
 	}
-	if os.Getenv("MCP_ALLOW_HTTP") == "true" {
+	if os.Getenv("MCP_ALLOW_HTTP") == "true" && !*allowHTTP {
 		*allowHTTP = true
 	}
 	if v := os.Getenv("MCP_AUTH_HEADER"); v != "" {
-		*headers = append(*headers, "Authorization:"+v)
+		hasAuth := false
+		for _, h := range *headers {
+			if strings.HasPrefix(strings.ToLower(h), "authorization:") {
+				hasAuth = true
+				break
+			}
+		}
+		if !hasAuth {
+			*headers = append(*headers, "Authorization:"+v)
+		}
 	}
 }

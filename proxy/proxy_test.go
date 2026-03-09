@@ -185,6 +185,20 @@ func TestBuildHTTPClient_InvalidProxyURL(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPClient_MissingScheme(t *testing.T) {
+	_, err := buildHTTPClient("proxy:8080")
+	if err == nil {
+		t.Error("Expected error for proxy URL without http/https scheme")
+	}
+}
+
+func TestBuildHTTPClient_MissingHost(t *testing.T) {
+	_, err := buildHTTPClient("http://")
+	if err == nil {
+		t.Error("Expected error for proxy URL without host")
+	}
+}
+
 func TestNewProxyWithOptions_Proxy(t *testing.T) {
 	p, err := NewProxyWithOptions("https://example.com", 3334, map[string]string{}, "test-hash", TransportModeAuto, "http://proxy:8080")
 	if err != nil {

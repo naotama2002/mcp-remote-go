@@ -90,6 +90,8 @@ func NewProxyWithOptions(serverURL string, callbackPort int, headers map[string]
 }
 
 // buildHTTPClient creates an http.Client with optional proxy configuration.
+// When a proxy is configured, it clones http.DefaultTransport to preserve
+// HTTP/2, timeouts, and connection pooling defaults.
 func buildHTTPClient(proxyURL string) (*http.Client, error) {
 	if proxyURL == "" {
 		return &http.Client{}, nil
@@ -100,10 +102,18 @@ func buildHTTPClient(proxyURL string) (*http.Client, error) {
 		return nil, fmt.Errorf("invalid proxy URL %q: %w", proxyURL, err)
 	}
 
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("invalid proxy URL %q: scheme must be http or https", proxyURL)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL %q: missing host", proxyURL)
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyURL(parsed)
+
 	return &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(parsed),
-		},
+		Transport: transport,
 	}, nil
 }
 
