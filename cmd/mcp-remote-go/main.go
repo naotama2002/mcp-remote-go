@@ -26,7 +26,7 @@ func main() {
 	flag.IntVar(&callbackPort, "port", 3334, "The callback port for OAuth")
 	flag.BoolVar(&allowHTTP, "allow-http", false, "Allow HTTP connections (only for trusted networks)")
 	flag.StringVar(&transportMode, "transport", "auto", "Transport mode: auto, streamable-http, sse")
-	flag.StringVar(&httpProxy, "proxy", "", "HTTP/HTTPS proxy URL (e.g. http://proxy:8080)")
+	flag.StringVar(&httpProxy, "https-proxy", "", "HTTP/HTTPS proxy URL (e.g. http://proxy:8080)")
 	flag.Var(&headers, "header", "Custom header to include in requests (format: 'Key:Value')")
 	flag.Parse()
 
@@ -51,7 +51,7 @@ func main() {
 	applyEnvOverrides(&serverURL, &callbackPort, &allowHTTP, &transportMode, &httpProxy, &headers)
 
 	if serverURL == "" {
-		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-proxy <proxy-url>] [-header 'Key:Value'] ...")
+		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-https-proxy <proxy-url>] [-header 'Key:Value'] ...")
 		os.Exit(1)
 	}
 
@@ -151,10 +151,10 @@ func parseRemainingArgs(remaining []string, defaults cliConfig) cliConfig {
 			i++
 		case strings.HasPrefix(arg, "--header=") || strings.HasPrefix(arg, "-header="):
 			cfg.headers = append(cfg.headers, strings.SplitN(arg, "=", 2)[1])
-		case (arg == "--proxy" || arg == "-proxy") && i+1 < len(remaining):
+		case (arg == "--https-proxy" || arg == "-https-proxy") && i+1 < len(remaining):
 			cfg.httpProxy = remaining[i+1]
 			i++
-		case strings.HasPrefix(arg, "--proxy=") || strings.HasPrefix(arg, "-proxy="):
+		case strings.HasPrefix(arg, "--https-proxy=") || strings.HasPrefix(arg, "-https-proxy="):
 			cfg.httpProxy = strings.SplitN(arg, "=", 2)[1]
 		case arg == "--allow-http" || arg == "-allow-http":
 			cfg.allowHTTP = true

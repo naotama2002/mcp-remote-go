@@ -296,8 +296,8 @@ func TestApplyEnvOverrides_NoEnvVars(t *testing.T) {
 	}
 }
 
-func TestParseRemainingArgs_ProxyAfterURL(t *testing.T) {
-	remaining := []string{"https://example.com/mcp", "--proxy", "http://proxy:8080"}
+func TestParseRemainingArgs_HttpsProxyAfterURL(t *testing.T) {
+	remaining := []string{"https://example.com/mcp", "--https-proxy", "http://proxy:8080"}
 	cfg := parseRemainingArgs(remaining, cliConfig{
 		callbackPort:  3334,
 		transportMode: "auto",
@@ -308,8 +308,8 @@ func TestParseRemainingArgs_ProxyAfterURL(t *testing.T) {
 	}
 }
 
-func TestParseRemainingArgs_ProxyEqualsForm(t *testing.T) {
-	remaining := []string{"https://example.com/mcp", "--proxy=http://proxy:3128"}
+func TestParseRemainingArgs_HttpsProxyEqualsForm(t *testing.T) {
+	remaining := []string{"https://example.com/mcp", "--https-proxy=http://proxy:3128"}
 	cfg := parseRemainingArgs(remaining, cliConfig{
 		callbackPort:  3334,
 		transportMode: "auto",

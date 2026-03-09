@@ -89,7 +89,7 @@ mcp-remote-go https://remote.mcp.server/mcp --header "Authorization: Bearer YOUR
 mcp-remote-go http://internal.mcp.server/mcp --allow-http
 
 # Via HTTP/HTTPS proxy
-mcp-remote-go https://remote.mcp.server/mcp --proxy http://proxy.example.com:8080
+mcp-remote-go https://remote.mcp.server/mcp --https-proxy http://proxy.example.com:8080
 ```
 
 ### Docker Usage
@@ -285,7 +285,7 @@ All options can also be set via environment variables. CLI flags take precedence
 | `MCP_TRANSPORT` | Transport mode (`auto`, `streamable-http`, `sse`) | `--transport` |
 | `MCP_PORT` | OAuth callback port | `--port` |
 | `MCP_ALLOW_HTTP` | Set to `true` to allow HTTP | `--allow-http` |
-| `MCP_HTTPS_PROXY` | HTTP/HTTPS proxy URL | `--proxy` |
+| `MCP_HTTPS_PROXY` | HTTP/HTTPS proxy URL | `--https-proxy` |
 | `MCP_AUTH_HEADER` | Authorization header value | `--header "Authorization: ..."` |
 
 These environment variables are used internally by the MCPB extension to pass GUI-configured values to the binary.
