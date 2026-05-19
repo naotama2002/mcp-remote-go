@@ -119,6 +119,20 @@ func (o *OpenIDConnectDiscovery) fetchMetadata(ctx context.Context, metadataURL 
 	return &metadata, nil
 }
 
+func validatePRMURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid protected resource metadata URL %q: %w", raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("protected resource metadata URL %q must use http or https scheme", raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("protected resource metadata URL %q must include a host", raw)
+	}
+	return nil
+}
+
 // ProtectedResourceMetadata holds RFC 9728 Protected Resource Metadata
 type ProtectedResourceMetadata struct {
 	Resource             string   `json:"resource"`
@@ -155,6 +169,12 @@ func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL str
 			return nil, fmt.Errorf("invalid server URL: %w", err)
 		}
 		wellKnownURL = fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", parsed.Scheme, parsed.Host)
+	} else {
+		// The PRM URL came from an untrusted WWW-Authenticate header; reject
+		// non-absolute or non-http(s) values rather than fetching them.
+		if err := validatePRMURL(wellKnownURL); err != nil {
+			return nil, err
+		}
 	}
 
 	resp, err := p.client.Get(ctx, wellKnownURL, nil)

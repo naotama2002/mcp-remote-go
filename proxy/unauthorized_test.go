@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +75,37 @@ func TestSSEConnectReturnsUnauthorizedError(t *testing.T) {
 	}
 	if unauth.WWWAuthenticate != wwwAuth {
 		t.Errorf("WWWAuthenticate = %q, want %q", unauth.WWWAuthenticate, wwwAuth)
+	}
+}
+
+// TestSSESendUnauthorizedDoesNotDoubleCloseBody guards against the
+// `unauthorizedFromResponse` helper closing the response body while a deferred
+// Close in the caller still tries to close it again — that produced a noisy
+// "failed to close response body" log line on every 401.
+func TestSSESendUnauthorizedDoesNotDoubleCloseBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://example.com/prm"`)
+		http.Error(w, "unauthorised", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(origOutput)
+
+	transport := NewSSETransport(SSETransportConfig{
+		ServerURL: srv.URL,
+		Client:    srv.Client(),
+	})
+	transport.setCommandEndpoint(srv.URL)
+
+	if err := transport.Send(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)); err == nil {
+		t.Fatal("expected 401 error from Send, got nil")
+	}
+
+	if strings.Contains(buf.String(), "failed to close response body") {
+		t.Errorf("unexpected double-close warning in log output:\n%s", buf.String())
 	}
 }
 

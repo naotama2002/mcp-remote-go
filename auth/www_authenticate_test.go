@@ -77,6 +77,18 @@ func TestParseWWWAuthenticate(t *testing.T) {
 			header: `MyBearer resource_metadata="https://example.com/prm"`,
 			wantOK: false,
 		},
+		{
+			name:             "non-boundary bearer earlier in header does not mask later Bearer",
+			header:           `MyBearer foo=bar, Bearer resource_metadata="https://example.com/prm"`,
+			wantOK:           true,
+			wantResourceMeta: "https://example.com/prm",
+		},
+		{
+			name:             "bearer substring inside a quoted realm before a real Bearer challenge",
+			header:           `Basic realm="Bearer-Realm", Bearer resource_metadata="https://example.com/prm"`,
+			wantOK:           true,
+			wantResourceMeta: "https://example.com/prm",
+		},
 	}
 
 	for _, tt := range tests {

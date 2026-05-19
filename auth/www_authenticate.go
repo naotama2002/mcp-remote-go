@@ -23,37 +23,41 @@ func ParseWWWAuthenticate(header string) (BearerChallenge, bool) {
 
 	// A WWW-Authenticate header may contain multiple challenges separated by
 	// commas, but parameters are also comma-separated, which makes naive
-	// splitting unsafe. We instead scan for "Bearer" tokens and parse from
-	// there.
+	// splitting unsafe. Scan all "bearer" occurrences and accept the first
+	// one on a proper token boundary, so a non-boundary substring (e.g.
+	// "MyBearer") does not mask a real Bearer challenge later in the header.
 	const scheme = "bearer"
 	lower := strings.ToLower(header)
-	idx := strings.Index(lower, scheme)
-	if idx < 0 {
-		return BearerChallenge{}, false
-	}
-	// Require the match to be at a token boundary so we don't pick up e.g.
-	// "MyBearer".
-	if idx > 0 {
-		prev := header[idx-1]
-		if prev != ' ' && prev != ',' && prev != '\t' {
+
+	for offset := 0; offset < len(lower); {
+		idx := strings.Index(lower[offset:], scheme)
+		if idx < 0 {
 			return BearerChallenge{}, false
 		}
-	}
-	rest := header[idx+len(scheme):]
-	// The scheme name must be followed by whitespace or end-of-string.
-	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
-		return BearerChallenge{}, false
-	}
-	rest = strings.TrimSpace(rest)
+		pos := offset + idx
+		offset = pos + len(scheme)
 
-	params := parseAuthParams(rest)
-	return BearerChallenge{
-		ResourceMetadata: params["resource_metadata"],
-		Realm:            params["realm"],
-		Scope:            params["scope"],
-		Error:            params["error"],
-		ErrorDescription: params["error_description"],
-	}, true
+		if pos > 0 {
+			prev := header[pos-1]
+			if prev != ' ' && prev != ',' && prev != '\t' {
+				continue
+			}
+		}
+		rest := header[pos+len(scheme):]
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' && rest[0] != ',' {
+			continue
+		}
+
+		params := parseAuthParams(strings.TrimSpace(rest))
+		return BearerChallenge{
+			ResourceMetadata: params["resource_metadata"],
+			Realm:            params["realm"],
+			Scope:            params["scope"],
+			Error:            params["error"],
+			ErrorDescription: params["error_description"],
+		}, true
+	}
+	return BearerChallenge{}, false
 }
 
 // parseAuthParams parses a comma-separated list of key=value or key="value"
