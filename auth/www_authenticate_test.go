@@ -145,6 +145,16 @@ func TestBestWWWAuthenticateHeader(t *testing.T) {
 			headers: nil,
 			want:    "",
 		},
+		{
+			name:    "no Bearer falls back to first non-empty line for diagnostics",
+			headers: []string{`Digest realm="corp"`, `Negotiate`},
+			want:    `Digest realm="corp"`,
+		},
+		{
+			name:    "blank lines are skipped when falling back",
+			headers: []string{"", `  `, `Digest realm="corp"`},
+			want:    `Digest realm="corp"`,
+		},
 	}
 
 	for _, tt := range tests {

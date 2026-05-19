@@ -63,13 +63,17 @@ func ParseWWWAuthenticate(header string) (BearerChallenge, bool) {
 // BestWWWAuthenticateHeader selects the most useful WWW-Authenticate field value
 // when a response carries multiple header lines (RFC 9110). Preference order:
 // Bearer challenge with resource_metadata, any Bearer challenge, then the first
-// non-empty line.
+// non-empty line (preserved for diagnostic logging even when the challenge is
+// not Bearer).
 func BestWWWAuthenticateHeader(headers []string) string {
-	var bearerFallback string
+	var firstLine, bearerFallback string
 	for _, h := range headers {
 		h = strings.TrimSpace(h)
 		if h == "" {
 			continue
+		}
+		if firstLine == "" {
+			firstLine = h
 		}
 		challenge, ok := ParseWWWAuthenticate(h)
 		if !ok {
@@ -82,7 +86,10 @@ func BestWWWAuthenticateHeader(headers []string) string {
 			bearerFallback = h
 		}
 	}
-	return bearerFallback
+	if bearerFallback != "" {
+		return bearerFallback
+	}
+	return firstLine
 }
 
 // ParseWWWAuthenticateHeaders parses Bearer challenges across multiple

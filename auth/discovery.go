@@ -164,11 +164,11 @@ func (p *ProtectedResourceDiscovery) Name() string {
 func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
 	wellKnownURL := p.metadataURL
 	if wellKnownURL == "" {
-		parsed, err := url.Parse(serverURL)
+		var err error
+		wellKnownURL, err = ProtectedResourceWellKnownURL(serverURL)
 		if err != nil {
 			return nil, fmt.Errorf("invalid server URL: %w", err)
 		}
-		wellKnownURL = fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", parsed.Scheme, parsed.Host)
 	} else {
 		// The PRM URL came from an untrusted WWW-Authenticate header; reject
 		// non-absolute or non-http(s) values rather than fetching them.
@@ -186,6 +186,10 @@ func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL str
 	var prm ProtectedResourceMetadata
 	if err := resp.JSON(&prm); err != nil {
 		return nil, fmt.Errorf("failed to parse protected resource metadata from %s: %w", wellKnownURL, err)
+	}
+
+	if err := ValidatePRMResource(prm.Resource, serverURL); err != nil {
+		return nil, err
 	}
 
 	if len(prm.AuthorizationServers) == 0 {

@@ -89,3 +89,84 @@ func TestCanonicalResourceURI(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedResourceWellKnownURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "host only",
+			input: "https://mcp.example.com",
+			want:  "https://mcp.example.com/.well-known/oauth-protected-resource",
+		},
+		{
+			name:  "with path",
+			input: "https://mcp.example.com/mcp",
+			want:  "https://mcp.example.com/.well-known/oauth-protected-resource/mcp",
+		},
+		{
+			name:  "with path and query",
+			input: "https://mcp.example.com/mcp?tenant=acme",
+			want:  "https://mcp.example.com/.well-known/oauth-protected-resource/mcp?tenant=acme",
+		},
+		{
+			name:  "trailing slash on path stripped before well-known insert",
+			input: "https://mcp.example.com/mcp/",
+			want:  "https://mcp.example.com/.well-known/oauth-protected-resource/mcp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ProtectedResourceWellKnownURL(tt.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ProtectedResourceWellKnownURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidatePRMResource(t *testing.T) {
+	tests := []struct {
+		name      string
+		prm       string
+		server    string
+		wantMatch bool
+	}{
+		{
+			name:      "matching canonical URIs",
+			prm:       "https://mcp.example.com/mcp",
+			server:    "HTTPS://mcp.example.com/mcp/",
+			wantMatch: true,
+		},
+		{
+			name:      "mismatched resource",
+			prm:       "https://other.example.com/mcp",
+			server:    "https://mcp.example.com/mcp",
+			wantMatch: false,
+		},
+		{
+			name:      "empty resource",
+			prm:       "",
+			server:    "https://mcp.example.com",
+			wantMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePRMResource(tt.prm, tt.server)
+			if tt.wantMatch && err != nil {
+				t.Fatalf("expected match, got error: %v", err)
+			}
+			if !tt.wantMatch && err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}

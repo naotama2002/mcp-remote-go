@@ -34,6 +34,10 @@ type ClientInfo struct {
 	ClientSecretExpiresAt   int64    `json:"client_secret_expires_at,omitempty"`
 	RedirectURIs            []string `json:"redirect_uris"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	// RegisteredIssuer is the authorization server issuer this client_id was
+	// registered with (RFC 8414 issuer). Used to invalidate stale cache when the
+	// discovered AS changes.
+	RegisteredIssuer string `json:"registered_issuer,omitempty"`
 }
 
 // ServerMetadata holds the OAuth server metadata
@@ -274,11 +278,15 @@ func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL stri
 	return metadata, nil
 }
 
-// loadOrRegisterClient loads or registers a client
+// loadOrRegisterClient returns cached ClientInfo when it still matches the
+// currently-discovered authorization server (RFC 8414 issuer); otherwise it
+// performs RFC 7591 dynamic client registration. Issuer comparison covers the
+// WWW-Authenticate-driven discovery case where the AS may have changed without
+// changing the resource server URL, while still letting AS-with-no-DCR
+// configurations succeed via the cached static client_id.
 func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
-	// First try to load existing client info
 	clientInfo, err := c.loadClientInfo()
-	if err == nil {
+	if err == nil && c.clientInfoMatchesServer(clientInfo) {
 		return clientInfo, nil
 	}
 
@@ -316,12 +324,27 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 		return nil, fmt.Errorf("failed to parse client registration response: %w", err)
 	}
 
+	if c.serverMetadata != nil {
+		clientInfoResp.RegisteredIssuer = c.serverMetadata.Issuer
+	}
+
 	// Save client info
 	if err := c.saveClientInfo(&clientInfoResp); err != nil {
 		return nil, fmt.Errorf("failed to save client info: %w", err)
 	}
 
 	return &clientInfoResp, nil
+}
+
+func (c *Coordinator) clientInfoMatchesServer(clientInfo *ClientInfo) bool {
+	if c.serverMetadata == nil || clientInfo == nil {
+		return true
+	}
+	if clientInfo.RegisteredIssuer == "" {
+		// Legacy cache entry without issuer; still usable.
+		return true
+	}
+	return clientInfo.RegisteredIssuer == c.serverMetadata.Issuer
 }
 
 // startCallbackServer starts the HTTP server to receive the OAuth callback.
