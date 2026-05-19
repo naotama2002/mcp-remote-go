@@ -159,6 +159,7 @@ func TestBuildHTTPClient_NoProxy(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("Client should not be nil")
+		return
 	}
 	if client.Transport != nil {
 		t.Error("Transport should be nil (default) when no proxy is set")
@@ -172,6 +173,7 @@ func TestBuildHTTPClient_WithProxy(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("Client should not be nil")
+		return
 	}
 	if client.Transport == nil {
 		t.Fatal("Transport should not be nil when proxy is set")

@@ -52,8 +52,8 @@ func TestE2EStreamableHTTPAutoNegotiation(t *testing.T) {
 		"method":  "initialize",
 		"params": map[string]interface{}{
 			"protocolVersion": MCPProtocolVersion,
-			"capabilities":   map[string]interface{}{},
-			"clientInfo":     map[string]string{"name": "test-client", "version": "1.0.0"},
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]string{"name": "test-client", "version": "1.0.0"},
 		},
 	})
 
@@ -149,8 +149,8 @@ func TestE2EStreamableHTTPProbeIsolation(t *testing.T) {
 					"id":      msg["id"],
 					"result": map[string]interface{}{
 						"protocolVersion": MCPProtocolVersion,
-						"capabilities":   map[string]interface{}{},
-						"serverInfo":     map[string]string{"name": "test", "version": "1.0.0"},
+						"capabilities":    map[string]interface{}{},
+						"serverInfo":      map[string]string{"name": "test", "version": "1.0.0"},
 					},
 				})
 			default:
@@ -192,7 +192,7 @@ func TestE2EStreamableHTTPProbeIsolation(t *testing.T) {
 		"method":  "initialize",
 		"params": map[string]interface{}{
 			"protocolVersion": MCPProtocolVersion,
-			"capabilities":   map[string]interface{}{},
+			"capabilities":    map[string]interface{}{},
 		},
 	})
 
@@ -239,8 +239,8 @@ func TestE2ESSEFallbackPipeline(t *testing.T) {
 					"id":      msg["id"],
 					"result": map[string]interface{}{
 						"protocolVersion": "2024-11-05",
-						"capabilities":   map[string]interface{}{},
-						"serverInfo":     map[string]string{"name": "sse-server", "version": "1.0.0"},
+						"capabilities":    map[string]interface{}{},
+						"serverInfo":      map[string]string{"name": "sse-server", "version": "1.0.0"},
 					},
 				}
 			case "tools/list":
@@ -316,7 +316,7 @@ func TestE2ESSEFallbackPipeline(t *testing.T) {
 		"method":  "initialize",
 		"params": map[string]interface{}{
 			"protocolVersion": "2024-11-05",
-			"capabilities":   map[string]interface{}{},
+			"capabilities":    map[string]interface{}{},
 		},
 	})
 

@@ -510,7 +510,7 @@ func TestStreamableHTTPTransportE2E(t *testing.T) {
 					"id":      msg["id"],
 					"result": map[string]interface{}{
 						"protocolVersion": MCPProtocolVersion,
-						"capabilities":   map[string]interface{}{},
+						"capabilities":    map[string]interface{}{},
 						"serverInfo": map[string]string{
 							"name":    "test-server",
 							"version": "1.0.0",
