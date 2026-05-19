@@ -14,7 +14,8 @@ MCP Remote proxies between:
 - **Legacy SSE transport** (MCP 2024-11-05) - Traditional two-endpoint SSE connection
 - **Auto-negotiation** - Automatically detects server capabilities and selects the optimal transport
 - **OAuth 2.1 with PKCE** (RFC 7636) - Secure authorization with S256 code challenge
-- **Protected Resource Metadata** (RFC 9728) - Discover authorization servers from resource endpoints
+- **Protected Resource Metadata** (RFC 9728) - Discover authorization servers from resource endpoints, including `WWW-Authenticate`-driven discovery on 401 responses (§5.1)
+- **Resource Indicators** (RFC 8707) - The MCP server's canonical URI is sent as `resource` on both authorization and token requests
 - **OAuth Discovery** (RFC 8414) and OpenID Connect Discovery
 - **Custom headers** and HTTPS enforcement
 
@@ -296,7 +297,8 @@ The first time you connect to a server requiring authentication, you'll be promp
 
 The OAuth implementation supports:
 - **PKCE (RFC 7636)** with S256 code challenge for enhanced security
-- **Protected Resource Metadata (RFC 9728)** for discovering authorization servers
+- **Protected Resource Metadata (RFC 9728)** for discovering authorization servers, with `WWW-Authenticate`-driven PRM lookup on 401 (§5.1)
+- **Resource Indicators (RFC 8707)** — the MCP server's canonical URI is sent as `resource` on both authorization and token requests, as required by the MCP authorization spec
 - **OAuth 2.0 Authorization Server Metadata (RFC 8414)** and OpenID Connect Discovery
 
 Authorization tokens are stored in `~/.mcp-remote-go-auth/` and will be reused for future connections.
