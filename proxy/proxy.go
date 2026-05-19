@@ -23,9 +23,9 @@ import (
 type TransportMode string
 
 const (
-	TransportModeAuto          TransportMode = "auto"
+	TransportModeAuto           TransportMode = "auto"
 	TransportModeStreamableHTTP TransportMode = "streamable-http"
-	TransportModeSSE           TransportMode = "sse"
+	TransportModeSSE            TransportMode = "sse"
 )
 
 // Proxy handles the bidirectional communication between stdio (MCP client) and the remote server
