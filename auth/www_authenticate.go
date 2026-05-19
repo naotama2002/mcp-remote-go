@@ -60,6 +60,41 @@ func ParseWWWAuthenticate(header string) (BearerChallenge, bool) {
 	return BearerChallenge{}, false
 }
 
+// BestWWWAuthenticateHeader selects the most useful WWW-Authenticate field value
+// when a response carries multiple header lines (RFC 9110). Preference order:
+// Bearer challenge with resource_metadata, any Bearer challenge, then the first
+// non-empty line.
+func BestWWWAuthenticateHeader(headers []string) string {
+	var bearerFallback string
+	for _, h := range headers {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		challenge, ok := ParseWWWAuthenticate(h)
+		if !ok {
+			continue
+		}
+		if challenge.ResourceMetadata != "" {
+			return h
+		}
+		if bearerFallback == "" {
+			bearerFallback = h
+		}
+	}
+	return bearerFallback
+}
+
+// ParseWWWAuthenticateHeaders parses Bearer challenges across multiple
+// WWW-Authenticate header field values.
+func ParseWWWAuthenticateHeaders(headers []string) (BearerChallenge, bool) {
+	h := BestWWWAuthenticateHeader(headers)
+	if h == "" {
+		return BearerChallenge{}, false
+	}
+	return ParseWWWAuthenticate(h)
+}
+
 // parseAuthParams parses a comma-separated list of key=value or key="value"
 // pairs. Values containing commas must be quoted. Unrecognised tokens
 // (e.g. another auth-scheme starting after a comma) terminate parsing.

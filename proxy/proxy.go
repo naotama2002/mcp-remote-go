@@ -208,7 +208,7 @@ func (p *Proxy) negotiateTransport() error {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	wwwAuth := resp.Header.Get(HeaderWWWAuthenticate)
+	wwwAuth := auth.BestWWWAuthenticateHeader(resp.Header.Values(HeaderWWWAuthenticate))
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}

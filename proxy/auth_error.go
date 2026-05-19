@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/naotama2002/mcp-remote-go/auth"
 )
 
 // HeaderWWWAuthenticate is the response header name carrying the Bearer
@@ -36,6 +38,6 @@ func unauthorizedFromResponse(resp *http.Response) *UnauthorizedError {
 	}
 	return &UnauthorizedError{
 		StatusCode:      resp.StatusCode,
-		WWWAuthenticate: resp.Header.Get(HeaderWWWAuthenticate),
+		WWWAuthenticate: auth.BestWWWAuthenticateHeader(resp.Header.Values(HeaderWWWAuthenticate)),
 	}
 }

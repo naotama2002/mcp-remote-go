@@ -234,6 +234,13 @@ func (t *StreamableHTTPTransport) startNotificationStream(ctx context.Context) {
 				if errors.Is(err, errNotificationStreamNotSupported) {
 					return
 				}
+				var unauth *UnauthorizedError
+				if errors.As(err, &unauth) {
+					if t.onError != nil {
+						t.onError(unauth)
+					}
+					return
+				}
 				log.Printf("Notification stream error: %v, reconnecting...", err)
 				select {
 				case <-notifyCtx.Done():

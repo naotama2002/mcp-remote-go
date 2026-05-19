@@ -115,3 +115,57 @@ func TestParseWWWAuthenticate(t *testing.T) {
 		})
 	}
 }
+
+func TestBestWWWAuthenticateHeader(t *testing.T) {
+	const bearerPRM = `Bearer resource_metadata="https://example.com/prm"`
+	const bearerBare = `Bearer realm="mcp"`
+
+	tests := []struct {
+		name    string
+		headers []string
+		want    string
+	}{
+		{
+			name:    "prefers Bearer with resource_metadata over earlier Digest line",
+			headers: []string{`Digest realm="corp"`, bearerPRM},
+			want:    bearerPRM,
+		},
+		{
+			name:    "skips non-Bearer lines",
+			headers: []string{`Negotiate`, bearerPRM},
+			want:    bearerPRM,
+		},
+		{
+			name:    "falls back to Bearer without resource_metadata",
+			headers: []string{`Digest realm="corp"`, bearerBare},
+			want:    bearerBare,
+		},
+		{
+			name:    "empty",
+			headers: nil,
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BestWWWAuthenticateHeader(tt.headers); got != tt.want {
+				t.Errorf("BestWWWAuthenticateHeader() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseWWWAuthenticateHeaders(t *testing.T) {
+	headers := []string{
+		`Digest realm="corp"`,
+		`Bearer resource_metadata="https://example.com/prm"`,
+	}
+	challenge, ok := ParseWWWAuthenticateHeaders(headers)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if challenge.ResourceMetadata != "https://example.com/prm" {
+		t.Errorf("ResourceMetadata = %q", challenge.ResourceMetadata)
+	}
+}

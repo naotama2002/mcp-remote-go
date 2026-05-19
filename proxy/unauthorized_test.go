@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestStreamableHTTPSendReturnsUnauthorizedError verifies that a 401 response
@@ -39,6 +41,95 @@ func TestStreamableHTTPSendReturnsUnauthorizedError(t *testing.T) {
 	}
 	if unauth.StatusCode != http.StatusUnauthorized {
 		t.Errorf("StatusCode = %d, want %d", unauth.StatusCode, http.StatusUnauthorized)
+	}
+	if unauth.WWWAuthenticate != wwwAuth {
+		t.Errorf("WWWAuthenticate = %q, want %q", unauth.WWWAuthenticate, wwwAuth)
+	}
+}
+
+// TestUnauthorizedErrorUsesBearerFromSecondWWWAuthenticateHeader verifies that
+// when the server sends multiple WWW-Authenticate header lines, the Bearer
+// challenge (especially with resource_metadata) is selected instead of only
+// reading the first line via Header.Get.
+func TestUnauthorizedErrorUsesBearerFromSecondWWWAuthenticateHeader(t *testing.T) {
+	const digestLine = `Digest realm="corp"`
+	const bearerLine = `Bearer resource_metadata="https://example.com/prm"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("WWW-Authenticate", digestLine)
+		w.Header().Add("WWW-Authenticate", bearerLine)
+		http.Error(w, "unauthorised", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	transport := NewStreamableHTTPTransport(StreamableHTTPTransportConfig{
+		Endpoint: srv.URL,
+		Client:   srv.Client(),
+	})
+
+	err := transport.Send(context.Background(), []byte(`{"jsonrpc":"2.0","method":"ping","id":1}`))
+	if err == nil {
+		t.Fatal("expected error from Send, got nil")
+	}
+
+	var unauth *UnauthorizedError
+	if !errors.As(err, &unauth) {
+		t.Fatalf("expected *UnauthorizedError, got %T: %v", err, err)
+	}
+	if unauth.WWWAuthenticate != bearerLine {
+		t.Errorf("WWWAuthenticate = %q, want %q", unauth.WWWAuthenticate, bearerLine)
+	}
+}
+
+// TestStreamableHTTPNotificationStreamUnauthorizedCallsOnError verifies that a
+// 401 on the background GET notification stream surfaces via SetOnError so the
+// proxy can re-authenticate instead of retrying indefinitely.
+func TestStreamableHTTPNotificationStreamUnauthorizedCallsOnError(t *testing.T) {
+	const wwwAuth = `Bearer resource_metadata="https://example.com/prm"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", wwwAuth)
+		http.Error(w, "unauthorised", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	var (
+		onErrOnce sync.Once
+		onErr     error
+	)
+	done := make(chan struct{})
+
+	transport := NewStreamableHTTPTransport(StreamableHTTPTransportConfig{
+		Endpoint: srv.URL,
+		Client:   srv.Client(),
+	})
+	transport.SetOnError(func(err error) {
+		onErrOnce.Do(func() {
+			onErr = err
+			close(done)
+		})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := transport.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for onError callback")
+	}
+
+	var unauth *UnauthorizedError
+	if !errors.As(onErr, &unauth) {
+		t.Fatalf("expected *UnauthorizedError, got %T: %v", onErr, onErr)
 	}
 	if unauth.WWWAuthenticate != wwwAuth {
 		t.Errorf("WWWAuthenticate = %q, want %q", unauth.WWWAuthenticate, wwwAuth)
