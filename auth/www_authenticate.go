@@ -4,35 +4,17 @@ import (
 	"strings"
 )
 
-// BearerChallenge represents a parsed WWW-Authenticate Bearer challenge,
-// as used by MCP servers per RFC 9728 §5.1.
+// BearerChallenge is a parsed WWW-Authenticate Bearer challenge (RFC 9728 §5.1).
 type BearerChallenge struct {
-	// ResourceMetadata is the value of the "resource_metadata" parameter,
-	// pointing at the Protected Resource Metadata document.
 	ResourceMetadata string
-
-	// Realm is the (optional) "realm" parameter.
-	Realm string
-
-	// Scope is the (optional) "scope" parameter.
-	Scope string
-
-	// Error and ErrorDescription are RFC 6750 error parameters, if present.
+	Realm            string
+	Scope            string
 	Error            string
 	ErrorDescription string
-
-	// Params holds any other parameters present in the challenge.
-	Params map[string]string
 }
 
-// ParseWWWAuthenticate parses a WWW-Authenticate header value looking for a
-// Bearer challenge. It tolerates multiple challenges in the same header and
-// returns the first Bearer one. If no Bearer challenge is found, the returned
-// challenge is the zero value and ok is false.
-//
-// The parser is intentionally lenient: it accepts both quoted and unquoted
-// parameter values and ignores parameters it cannot parse, rather than
-// failing the whole header.
+// ParseWWWAuthenticate returns the first Bearer challenge found in a
+// WWW-Authenticate header, tolerating multiple challenges in the same header.
 func ParseWWWAuthenticate(header string) (BearerChallenge, bool) {
 	header = strings.TrimSpace(header)
 	if header == "" {
@@ -65,18 +47,13 @@ func ParseWWWAuthenticate(header string) (BearerChallenge, bool) {
 	rest = strings.TrimSpace(rest)
 
 	params := parseAuthParams(rest)
-	if len(params) == 0 {
-		// A bare "Bearer" challenge is valid but uninteresting.
-		return BearerChallenge{Params: params}, true
-	}
-
-	ch := BearerChallenge{Params: params}
-	ch.ResourceMetadata = params["resource_metadata"]
-	ch.Realm = params["realm"]
-	ch.Scope = params["scope"]
-	ch.Error = params["error"]
-	ch.ErrorDescription = params["error_description"]
-	return ch, true
+	return BearerChallenge{
+		ResourceMetadata: params["resource_metadata"],
+		Realm:            params["realm"],
+		Scope:            params["scope"],
+		Error:            params["error"],
+		ErrorDescription: params["error_description"],
+	}, true
 }
 
 // parseAuthParams parses a comma-separated list of key=value or key="value"
@@ -121,7 +98,6 @@ func parseAuthParams(s string) map[string]string {
 		var value string
 		if i < len(s) && s[i] == '"' {
 			i++ // consume opening quote
-			valStart := i
 			var b strings.Builder
 			for i < len(s) {
 				c := s[i]
@@ -136,7 +112,6 @@ func parseAuthParams(s string) map[string]string {
 				b.WriteByte(c)
 				i++
 			}
-			_ = valStart
 			value = b.String()
 			if i < len(s) && s[i] == '"' {
 				i++ // consume closing quote

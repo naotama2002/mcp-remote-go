@@ -67,16 +67,7 @@ func (es *EventSource) Connect() error {
 
 	// Check response code
 	if resp.StatusCode == http.StatusUnauthorized {
-		body, _ := io.ReadAll(resp.Body)
-		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-		return &UnauthorizedError{
-			StatusCode:      resp.StatusCode,
-			WWWAuthenticate: wwwAuth,
-			Body:            string(body),
-		}
+		return unauthorizedFromResponse(resp)
 	}
 
 	if resp.StatusCode != http.StatusOK {

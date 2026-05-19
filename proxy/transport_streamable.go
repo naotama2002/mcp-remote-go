@@ -95,16 +95,7 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 	contentType := resp.Header.Get("Content-Type")
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		body, _ := io.ReadAll(resp.Body)
-		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-		return &UnauthorizedError{
-			StatusCode:      resp.StatusCode,
-			WWWAuthenticate: wwwAuth,
-			Body:            string(body),
-		}
+		return unauthorizedFromResponse(resp)
 	}
 
 	switch {
@@ -285,16 +276,7 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		body, _ := io.ReadAll(resp.Body)
-		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Warning: failed to close response body: %v", err)
-		}
-		return &UnauthorizedError{
-			StatusCode:      resp.StatusCode,
-			WWWAuthenticate: wwwAuth,
-			Body:            string(body),
-		}
+		return unauthorizedFromResponse(resp)
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -208,7 +208,7 @@ func (p *Proxy) negotiateTransport() error {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	wwwAuth := resp.Header.Get(HeaderWWWAuthenticate)
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
@@ -299,10 +299,9 @@ func openBrowser(rawURL string) error {
 	return browser.OpenURL(rawURL)
 }
 
-// handleAuthentication handles the OAuth flow. The optional wwwAuthenticate
-// argument is the value of the WWW-Authenticate header from the triggering
-// 401 response; when present, the resource_metadata parameter (RFC 9728 §5.1)
-// is extracted and used to locate the Protected Resource Metadata document.
+// handleAuthentication runs the OAuth flow. When the triggering 401 carried a
+// WWW-Authenticate Bearer challenge, its resource_metadata URL (RFC 9728 §5.1)
+// is forwarded to discovery.
 func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 	var initOpts []auth.InitOption
 	if wwwAuthenticate != "" {

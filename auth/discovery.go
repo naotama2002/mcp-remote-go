@@ -127,24 +127,15 @@ type ProtectedResourceMetadata struct {
 }
 
 // ProtectedResourceDiscovery implements RFC 9728 Protected Resource Metadata discovery.
-// It fetches /.well-known/oauth-protected-resource from the resource server to find
-// the authorization server(s), then fetches OAuth metadata from those servers.
 type ProtectedResourceDiscovery struct {
-	client httpclient.Client
-	// metadataURL overrides the derived /.well-known/oauth-protected-resource
-	// URL. When set (typically from a WWW-Authenticate header), discovery
-	// fetches this URL directly.
-	metadataURL string
+	client      httpclient.Client
+	metadataURL string // when set, used verbatim instead of deriving from the server host
 }
 
-// NewProtectedResourceDiscovery creates a new RFC 9728 discovery strategy that
-// derives the PRM URL from the server host.
 func NewProtectedResourceDiscovery(client httpclient.Client) *ProtectedResourceDiscovery {
 	return &ProtectedResourceDiscovery{client: client}
 }
 
-// NewProtectedResourceDiscoveryFromURL creates an RFC 9728 discovery strategy
-// that fetches an explicit PRM URL (e.g. one obtained from WWW-Authenticate).
 func NewProtectedResourceDiscoveryFromURL(client httpclient.Client, metadataURL string) *ProtectedResourceDiscovery {
 	return &ProtectedResourceDiscovery{client: client, metadataURL: metadataURL}
 }
@@ -236,17 +227,14 @@ func (f *FallbackDiscovery) Discover(ctx context.Context, serverURL string) (*Se
 	}, nil
 }
 
-// DiscoverOption configures Discover.
 type DiscoverOption func(*discoverConfig)
 
 type discoverConfig struct {
 	protectedResourceMetadataURL string
 }
 
-// WithProtectedResourceMetadataURL provides an explicit Protected Resource
-// Metadata URL (typically obtained from a WWW-Authenticate header per
-// RFC 9728 §5.1). When set, the discovery service fetches that URL directly
-// rather than deriving one from the MCP server's host.
+// WithProtectedResourceMetadataURL passes an explicit Protected Resource
+// Metadata URL (typically from a WWW-Authenticate header per RFC 9728 §5.1).
 func WithProtectedResourceMetadataURL(url string) DiscoverOption {
 	return func(c *discoverConfig) {
 		c.protectedResourceMetadataURL = url
@@ -262,12 +250,14 @@ func (m *MetadataDiscoveryService) Discover(ctx context.Context, serverURL strin
 
 	var strategies []DiscoveryStrategy
 	if cfg.protectedResourceMetadataURL != "" {
-		// When a PRM URL is supplied (e.g. from WWW-Authenticate), try it
-		// first and trust it as the authoritative source.
+		// RFC 9728 §5.1: the WWW-Authenticate-supplied URL is authoritative,
+		// so skip the host-derived PRM lookup (which could point at a
+		// different, less trustworthy document on the resource host).
 		strategies = append(strategies, NewProtectedResourceDiscoveryFromURL(m.client, cfg.protectedResourceMetadataURL))
+	} else {
+		strategies = append(strategies, NewProtectedResourceDiscovery(m.client))
 	}
 	strategies = append(strategies,
-		NewProtectedResourceDiscovery(m.client),
 		NewStandardOAuthDiscovery(m.client),
 		NewOpenIDConnectDiscovery(m.client),
 		NewFallbackDiscovery(),

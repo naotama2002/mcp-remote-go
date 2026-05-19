@@ -42,12 +42,9 @@ func CanonicalResourceURI(serverURL string) (string, error) {
 		Path:     parsed.Path,
 		RawQuery: parsed.RawQuery,
 	}
-
-	// Strip trailing slash unless the path is just "/".
 	if len(canonical.Path) > 1 && strings.HasSuffix(canonical.Path, "/") {
 		canonical.Path = strings.TrimRight(canonical.Path, "/")
 	}
-	// "/" alone carries no information; drop it for consistency.
 	if canonical.Path == "/" {
 		canonical.Path = ""
 	}

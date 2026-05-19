@@ -55,12 +55,10 @@ type Coordinator struct {
 	callbackServer *http.Server
 	clientInfo     *ClientInfo
 	serverMetadata *ServerMetadata
-	// resource is the canonical URI of the MCP (resource) server, per RFC 8707,
-	// captured during InitializeAuth and reused in authorization and token requests.
-	resource     string
-	codeVerifier string // PKCE code_verifier for current auth flow
-	authMutex    sync.Mutex
-	callbackChan chan string
+	resource       string // RFC 8707 canonical resource URI, reused across the flow
+	codeVerifier   string
+	authMutex      sync.Mutex
+	callbackChan   chan string
 }
 
 // NewCoordinator creates a new authentication coordinator
@@ -80,7 +78,6 @@ func NewCoordinator(serverURLHash string, callbackPort int) (*Coordinator, error
 	}, nil
 }
 
-// InitOption configures InitializeAuth.
 type InitOption func(*initConfig)
 
 type initConfig struct {
@@ -88,8 +85,8 @@ type initConfig struct {
 }
 
 // WithResourceMetadataURL passes a Protected Resource Metadata URL extracted
-// from a WWW-Authenticate header (RFC 9728 §5.1). When set, discovery uses
-// this URL directly instead of deriving one from the MCP server host.
+// from a WWW-Authenticate header (RFC 9728 §5.1); when set, discovery fetches
+// it directly instead of deriving a URL from the MCP server host.
 func WithResourceMetadataURL(url string) InitOption {
 	return func(c *initConfig) {
 		c.resourceMetadataURL = url
@@ -106,16 +103,12 @@ func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (stri
 		o(cfg)
 	}
 
-	// 0. Compute the canonical resource URI per RFC 8707. MCP clients MUST send
-	// this in both authorization and token requests regardless of AS support.
 	resource, err := CanonicalResourceURI(serverURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to derive canonical resource URI: %w", err)
 	}
 	c.resource = resource
 
-	// 1. Discover server metadata, preferring the WWW-Authenticate-provided
-	//    PRM URL when present.
 	metadata, err := c.discoverServerMetadata(serverURL, cfg.resourceMetadataURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover server metadata: %w", err)
@@ -170,8 +163,7 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		"client_id":    c.clientInfo.ClientID,
 	}
 
-	// Resource Indicator (RFC 8707) — MUST be sent on the token request
-	// regardless of whether the AS supports it.
+	// RFC 8707 resource indicator (required by the MCP authorization spec).
 	if c.resource != "" {
 		formData["resource"] = c.resource
 	}
@@ -255,14 +247,9 @@ func (c *Coordinator) SaveTokens(tokens *Tokens) error {
 	})
 }
 
-// discoverServerMetadata discovers OAuth server metadata using multiple
-// strategies. If resourceMetadataURL is non-empty, discovery first attempts
-// the Protected Resource Metadata document at that URL (e.g. one obtained
-// from a WWW-Authenticate header per RFC 9728 §5.1).
 func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL string) (*ServerMetadata, error) {
-	// Don't reuse cached metadata when the caller supplied an explicit PRM
-	// URL: the cached entry may have been obtained through a different
-	// (less authoritative) path.
+	// Skip cache when the caller supplied an explicit PRM URL: the cached
+	// entry may have come from a different (less authoritative) path.
 	if resourceMetadataURL == "" {
 		if metadata, err := c.loadServerMetadata(); err == nil {
 			return metadata, nil
@@ -429,8 +416,7 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	params.Set("code_challenge", ComputeCodeChallenge(verifier))
 	params.Set("code_challenge_method", "S256")
 
-	// Resource Indicator (RFC 8707) — MUST be sent on the authorization
-	// request regardless of whether the AS supports it.
+	// RFC 8707 resource indicator (required by the MCP authorization spec).
 	if c.resource != "" {
 		params.Set("resource", c.resource)
 	}
