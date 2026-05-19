@@ -55,9 +55,12 @@ type Coordinator struct {
 	callbackServer *http.Server
 	clientInfo     *ClientInfo
 	serverMetadata *ServerMetadata
-	codeVerifier   string // PKCE code_verifier for current auth flow
-	authMutex      sync.Mutex
-	callbackChan   chan string
+	// resource is the canonical URI of the MCP (resource) server, per RFC 8707,
+	// captured during InitializeAuth and reused in authorization and token requests.
+	resource     string
+	codeVerifier string // PKCE code_verifier for current auth flow
+	authMutex    sync.Mutex
+	callbackChan chan string
 }
 
 // NewCoordinator creates a new authentication coordinator
@@ -77,13 +80,43 @@ func NewCoordinator(serverURLHash string, callbackPort int) (*Coordinator, error
 	}, nil
 }
 
+// InitOption configures InitializeAuth.
+type InitOption func(*initConfig)
+
+type initConfig struct {
+	resourceMetadataURL string
+}
+
+// WithResourceMetadataURL passes a Protected Resource Metadata URL extracted
+// from a WWW-Authenticate header (RFC 9728 §5.1). When set, discovery uses
+// this URL directly instead of deriving one from the MCP server host.
+func WithResourceMetadataURL(url string) InitOption {
+	return func(c *initConfig) {
+		c.resourceMetadataURL = url
+	}
+}
+
 // InitializeAuth starts the OAuth flow
-func (c *Coordinator) InitializeAuth(serverURL string) (string, error) {
+func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (string, error) {
 	c.authMutex.Lock()
 	defer c.authMutex.Unlock()
 
-	// 1. Discover server metadata
-	metadata, err := c.discoverServerMetadata(serverURL)
+	cfg := &initConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	// 0. Compute the canonical resource URI per RFC 8707. MCP clients MUST send
+	// this in both authorization and token requests regardless of AS support.
+	resource, err := CanonicalResourceURI(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to derive canonical resource URI: %w", err)
+	}
+	c.resource = resource
+
+	// 1. Discover server metadata, preferring the WWW-Authenticate-provided
+	//    PRM URL when present.
+	metadata, err := c.discoverServerMetadata(serverURL, cfg.resourceMetadataURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover server metadata: %w", err)
 	}
@@ -135,6 +168,12 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		"code":         code,
 		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
 		"client_id":    c.clientInfo.ClientID,
+	}
+
+	// Resource Indicator (RFC 8707) — MUST be sent on the token request
+	// regardless of whether the AS supports it.
+	if c.resource != "" {
+		formData["resource"] = c.resource
 	}
 
 	// Add PKCE code_verifier
@@ -216,12 +255,18 @@ func (c *Coordinator) SaveTokens(tokens *Tokens) error {
 	})
 }
 
-// discoverServerMetadata discovers OAuth server metadata using multiple strategies
-func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata, error) {
-	// First try to load cached metadata
-	metadata, err := c.loadServerMetadata()
-	if err == nil {
-		return metadata, nil
+// discoverServerMetadata discovers OAuth server metadata using multiple
+// strategies. If resourceMetadataURL is non-empty, discovery first attempts
+// the Protected Resource Metadata document at that URL (e.g. one obtained
+// from a WWW-Authenticate header per RFC 9728 §5.1).
+func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL string) (*ServerMetadata, error) {
+	// Don't reuse cached metadata when the caller supplied an explicit PRM
+	// URL: the cached entry may have been obtained through a different
+	// (less authoritative) path.
+	if resourceMetadataURL == "" {
+		if metadata, err := c.loadServerMetadata(); err == nil {
+			return metadata, nil
+		}
 	}
 
 	// Use the discovery service to find metadata
@@ -229,7 +274,7 @@ func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	metadata, err = discoveryService.Discover(ctx, serverURL)
+	metadata, err := discoveryService.Discover(ctx, serverURL, WithProtectedResourceMetadataURL(resourceMetadataURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover server metadata: %w", err)
 	}
@@ -383,6 +428,12 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	params.Set("scope", "mcp offline_access")
 	params.Set("code_challenge", ComputeCodeChallenge(verifier))
 	params.Set("code_challenge_method", "S256")
+
+	// Resource Indicator (RFC 8707) — MUST be sent on the authorization
+	// request regardless of whether the AS supports it.
+	if c.resource != "" {
+		params.Set("resource", c.resource)
+	}
 
 	// Combine URL
 	baseURL, err := url.Parse(c.serverMetadata.AuthorizationEndpoint)

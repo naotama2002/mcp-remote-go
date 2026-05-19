@@ -94,6 +94,19 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 
 	contentType := resp.Header.Get("Content-Type")
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+		return &UnauthorizedError{
+			StatusCode:      resp.StatusCode,
+			WWWAuthenticate: wwwAuth,
+			Body:            string(body),
+		}
+	}
+
 	switch {
 	case resp.StatusCode == http.StatusAccepted:
 		// Server accepted but will send response via notification stream
@@ -269,6 +282,19 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 		log.Println("Server does not support GET notification stream (405), notifications will arrive via POST responses")
 		// Return a sentinel error to stop the reconnection loop
 		return errNotificationStreamNotSupported
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("Warning: failed to close response body: %v", err)
+		}
+		return &UnauthorizedError{
+			StatusCode:      resp.StatusCode,
+			WWWAuthenticate: wwwAuth,
+			Body:            string(body),
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {

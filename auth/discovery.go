@@ -131,25 +131,40 @@ type ProtectedResourceMetadata struct {
 // the authorization server(s), then fetches OAuth metadata from those servers.
 type ProtectedResourceDiscovery struct {
 	client httpclient.Client
+	// metadataURL overrides the derived /.well-known/oauth-protected-resource
+	// URL. When set (typically from a WWW-Authenticate header), discovery
+	// fetches this URL directly.
+	metadataURL string
 }
 
-// NewProtectedResourceDiscovery creates a new RFC 9728 discovery strategy
+// NewProtectedResourceDiscovery creates a new RFC 9728 discovery strategy that
+// derives the PRM URL from the server host.
 func NewProtectedResourceDiscovery(client httpclient.Client) *ProtectedResourceDiscovery {
 	return &ProtectedResourceDiscovery{client: client}
 }
 
+// NewProtectedResourceDiscoveryFromURL creates an RFC 9728 discovery strategy
+// that fetches an explicit PRM URL (e.g. one obtained from WWW-Authenticate).
+func NewProtectedResourceDiscoveryFromURL(client httpclient.Client, metadataURL string) *ProtectedResourceDiscovery {
+	return &ProtectedResourceDiscovery{client: client, metadataURL: metadataURL}
+}
+
 func (p *ProtectedResourceDiscovery) Name() string {
+	if p.metadataURL != "" {
+		return "Protected Resource Metadata via WWW-Authenticate (RFC 9728)"
+	}
 	return "Protected Resource Metadata (RFC 9728)"
 }
 
 func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
-	parsed, err := url.Parse(serverURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid server URL: %w", err)
+	wellKnownURL := p.metadataURL
+	if wellKnownURL == "" {
+		parsed, err := url.Parse(serverURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid server URL: %w", err)
+		}
+		wellKnownURL = fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", parsed.Scheme, parsed.Host)
 	}
-
-	// Fetch /.well-known/oauth-protected-resource
-	wellKnownURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", parsed.Scheme, parsed.Host)
 
 	resp, err := p.client.Get(ctx, wellKnownURL, nil)
 	if err != nil {
@@ -221,14 +236,42 @@ func (f *FallbackDiscovery) Discover(ctx context.Context, serverURL string) (*Se
 	}, nil
 }
 
+// DiscoverOption configures Discover.
+type DiscoverOption func(*discoverConfig)
+
+type discoverConfig struct {
+	protectedResourceMetadataURL string
+}
+
+// WithProtectedResourceMetadataURL provides an explicit Protected Resource
+// Metadata URL (typically obtained from a WWW-Authenticate header per
+// RFC 9728 §5.1). When set, the discovery service fetches that URL directly
+// rather than deriving one from the MCP server's host.
+func WithProtectedResourceMetadataURL(url string) DiscoverOption {
+	return func(c *discoverConfig) {
+		c.protectedResourceMetadataURL = url
+	}
+}
+
 // Discover tries multiple discovery strategies in order
-func (m *MetadataDiscoveryService) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
-	strategies := []DiscoveryStrategy{
+func (m *MetadataDiscoveryService) Discover(ctx context.Context, serverURL string, opts ...DiscoverOption) (*ServerMetadata, error) {
+	cfg := &discoverConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	var strategies []DiscoveryStrategy
+	if cfg.protectedResourceMetadataURL != "" {
+		// When a PRM URL is supplied (e.g. from WWW-Authenticate), try it
+		// first and trust it as the authoritative source.
+		strategies = append(strategies, NewProtectedResourceDiscoveryFromURL(m.client, cfg.protectedResourceMetadataURL))
+	}
+	strategies = append(strategies,
 		NewProtectedResourceDiscovery(m.client),
 		NewStandardOAuthDiscovery(m.client),
 		NewOpenIDConnectDiscovery(m.client),
 		NewFallbackDiscovery(),
-	}
+	)
 
 	var lastErr error
 	for _, strategy := range strategies {

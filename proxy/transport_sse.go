@@ -120,6 +120,15 @@ func (t *SSETransport) Send(ctx context.Context, message []byte) error {
 		}
 	}()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		return &UnauthorizedError{
+			StatusCode:      resp.StatusCode,
+			WWWAuthenticate: resp.Header.Get("WWW-Authenticate"),
+			Body:            string(body),
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server returned error status: %d - %s", resp.StatusCode, string(body))
