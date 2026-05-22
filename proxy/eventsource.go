@@ -66,6 +66,10 @@ func (es *EventSource) Connect() error {
 	}
 
 	// Check response code
+	if resp.StatusCode == http.StatusUnauthorized {
+		return unauthorizedFromResponse(resp)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		if err := resp.Body.Close(); err != nil {

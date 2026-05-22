@@ -114,6 +114,13 @@ func (t *SSETransport) Send(ctx context.Context, message []byte) error {
 	if err != nil {
 		return fmt.Errorf("POST request failed: %w", err)
 	}
+
+	// unauthorizedFromResponse takes ownership of the body, so this check
+	// must happen before the deferred Close to avoid a double-close.
+	if resp.StatusCode == http.StatusUnauthorized {
+		return unauthorizedFromResponse(resp)
+	}
+
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
 			log.Printf("Warning: failed to close response body: %v", err)

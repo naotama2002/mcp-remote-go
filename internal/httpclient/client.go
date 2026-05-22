@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"time"
 )
 
@@ -223,23 +224,15 @@ func (c *Client) PostForm(ctx context.Context, url string, formData map[string]s
 	}
 	headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-	// Convert form data to URL-encoded string
-	values := make([]string, 0, len(formData))
+	values := make(neturl.Values, len(formData))
 	for key, value := range formData {
-		values = append(values, fmt.Sprintf("%s=%s", key, value))
-	}
-	body := ""
-	for i, v := range values {
-		if i > 0 {
-			body += "&"
-		}
-		body += v
+		values.Set(key, value)
 	}
 
 	return c.Do(ctx, &Request{
 		Method:  http.MethodPost,
 		URL:     url,
 		Headers: headers,
-		Body:    body,
+		Body:    values.Encode(),
 	})
 }

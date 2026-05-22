@@ -254,11 +254,12 @@ func TestProtectedResourceDiscovery(t *testing.T) {
 
 func TestProtectedResourceDiscoveryFallback(t *testing.T) {
 	// Resource server returns protected resource metadata, but auth server is unreachable
+	var resourceURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/oauth-protected-resource":
 			prm := &ProtectedResourceMetadata{
-				Resource:             "https://example.com",
+				Resource:             resourceURL,
 				AuthorizationServers: []string{"https://unreachable.example.com"},
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -272,6 +273,7 @@ func TestProtectedResourceDiscoveryFallback(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	resourceURL = server.URL
 
 	service := NewMetadataDiscoveryService()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -292,10 +294,11 @@ func TestProtectedResourceDiscoveryFallback(t *testing.T) {
 func TestProtectedResourceDiscoveryNoAuthServers(t *testing.T) {
 	strategy := NewProtectedResourceDiscovery(*httpclient.New(nil))
 
+	var resourceURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/oauth-protected-resource" {
 			prm := &ProtectedResourceMetadata{
-				Resource:             "https://example.com",
+				Resource:             resourceURL,
 				AuthorizationServers: []string{}, // empty
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -303,6 +306,7 @@ func TestProtectedResourceDiscoveryNoAuthServers(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	resourceURL = server.URL
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

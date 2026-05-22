@@ -160,6 +160,46 @@ func TestPostForm(t *testing.T) {
 	}
 }
 
+// TestPostFormEncodesSpecialCharacters guards against form-body corruption
+// when a value contains characters that are significant in
+// application/x-www-form-urlencoded (e.g. '&', '=', '+', ' ', or non-ASCII).
+// Regression case: an OAuth `resource` parameter carrying a query string
+// like `https://mcp.example.com/x?tenant=acme&debug=1` would otherwise be
+// split into multiple form fields.
+func TestPostFormEncodesSpecialCharacters(t *testing.T) {
+	const tricky = "https://mcp.example.com/x?tenant=acme&debug=1 path with spaces"
+
+	var (
+		gotResource string
+		gotOther    string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm failed: %v", err)
+		}
+		gotResource = r.Form.Get("resource")
+		gotOther = r.Form.Get("other")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	resp, err := New(nil).PostForm(context.Background(), server.URL, map[string]string{
+		"resource": tricky,
+		"other":    "plain",
+	}, nil)
+	if err != nil {
+		t.Fatalf("PostForm failed: %v", err)
+	}
+	_ = resp.SafeClose()
+
+	if gotResource != tricky {
+		t.Errorf("resource decoded as %q, want %q", gotResource, tricky)
+	}
+	if gotOther != "plain" {
+		t.Errorf("other = %q, want %q", gotOther, "plain")
+	}
+}
+
 func TestErrorHandling(t *testing.T) {
 	// Test server that returns 404
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -94,6 +94,10 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 
 	contentType := resp.Header.Get("Content-Type")
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return unauthorizedFromResponse(resp)
+	}
+
 	switch {
 	case resp.StatusCode == http.StatusAccepted:
 		// Server accepted but will send response via notification stream
@@ -230,6 +234,13 @@ func (t *StreamableHTTPTransport) startNotificationStream(ctx context.Context) {
 				if errors.Is(err, errNotificationStreamNotSupported) {
 					return
 				}
+				var unauth *UnauthorizedError
+				if errors.As(err, &unauth) {
+					if t.onError != nil {
+						t.onError(unauth)
+					}
+					return
+				}
 				log.Printf("Notification stream error: %v, reconnecting...", err)
 				select {
 				case <-notifyCtx.Done():
@@ -269,6 +280,10 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 		log.Println("Server does not support GET notification stream (405), notifications will arrive via POST responses")
 		// Return a sentinel error to stop the reconnection loop
 		return errNotificationStreamNotSupported
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return unauthorizedFromResponse(resp)
 	}
 
 	if resp.StatusCode != http.StatusOK {

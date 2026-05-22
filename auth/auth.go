@@ -34,6 +34,10 @@ type ClientInfo struct {
 	ClientSecretExpiresAt   int64    `json:"client_secret_expires_at,omitempty"`
 	RedirectURIs            []string `json:"redirect_uris"`
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	// RegisteredIssuer is the authorization server issuer this client_id was
+	// registered with (RFC 8414 issuer). Used to invalidate stale cache when the
+	// discovered AS changes.
+	RegisteredIssuer string `json:"registered_issuer,omitempty"`
 }
 
 // ServerMetadata holds the OAuth server metadata
@@ -55,7 +59,8 @@ type Coordinator struct {
 	callbackServer *http.Server
 	clientInfo     *ClientInfo
 	serverMetadata *ServerMetadata
-	codeVerifier   string // PKCE code_verifier for current auth flow
+	resource       string // RFC 8707 canonical resource URI, reused across the flow
+	codeVerifier   string
 	authMutex      sync.Mutex
 	callbackChan   chan string
 }
@@ -77,13 +82,38 @@ func NewCoordinator(serverURLHash string, callbackPort int) (*Coordinator, error
 	}, nil
 }
 
+type InitOption func(*initConfig)
+
+type initConfig struct {
+	resourceMetadataURL string
+}
+
+// WithResourceMetadataURL passes a Protected Resource Metadata URL extracted
+// from a WWW-Authenticate header (RFC 9728 §5.1); when set, discovery fetches
+// it directly instead of deriving a URL from the MCP server host.
+func WithResourceMetadataURL(url string) InitOption {
+	return func(c *initConfig) {
+		c.resourceMetadataURL = url
+	}
+}
+
 // InitializeAuth starts the OAuth flow
-func (c *Coordinator) InitializeAuth(serverURL string) (string, error) {
+func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (string, error) {
 	c.authMutex.Lock()
 	defer c.authMutex.Unlock()
 
-	// 1. Discover server metadata
-	metadata, err := c.discoverServerMetadata(serverURL)
+	cfg := &initConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	resource, err := CanonicalResourceURI(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to derive canonical resource URI: %w", err)
+	}
+	c.resource = resource
+
+	metadata, err := c.discoverServerMetadata(serverURL, cfg.resourceMetadataURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to discover server metadata: %w", err)
 	}
@@ -135,6 +165,11 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		"code":         code,
 		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
 		"client_id":    c.clientInfo.ClientID,
+	}
+
+	// RFC 8707 resource indicator (required by the MCP authorization spec).
+	if c.resource != "" {
+		formData["resource"] = c.resource
 	}
 
 	// Add PKCE code_verifier
@@ -216,12 +251,13 @@ func (c *Coordinator) SaveTokens(tokens *Tokens) error {
 	})
 }
 
-// discoverServerMetadata discovers OAuth server metadata using multiple strategies
-func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata, error) {
-	// First try to load cached metadata
-	metadata, err := c.loadServerMetadata()
-	if err == nil {
-		return metadata, nil
+func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL string) (*ServerMetadata, error) {
+	// Skip cache when the caller supplied an explicit PRM URL: the cached
+	// entry may have come from a different (less authoritative) path.
+	if resourceMetadataURL == "" {
+		if metadata, err := c.loadServerMetadata(); err == nil {
+			return metadata, nil
+		}
 	}
 
 	// Use the discovery service to find metadata
@@ -229,7 +265,7 @@ func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	metadata, err = discoveryService.Discover(ctx, serverURL)
+	metadata, err := discoveryService.Discover(ctx, serverURL, WithProtectedResourceMetadataURL(resourceMetadataURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover server metadata: %w", err)
 	}
@@ -242,11 +278,15 @@ func (c *Coordinator) discoverServerMetadata(serverURL string) (*ServerMetadata,
 	return metadata, nil
 }
 
-// loadOrRegisterClient loads or registers a client
+// loadOrRegisterClient returns cached ClientInfo when it still matches the
+// currently-discovered authorization server (RFC 8414 issuer); otherwise it
+// performs RFC 7591 dynamic client registration. Issuer comparison covers the
+// WWW-Authenticate-driven discovery case where the AS may have changed without
+// changing the resource server URL, while still letting AS-with-no-DCR
+// configurations succeed via the cached static client_id.
 func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
-	// First try to load existing client info
 	clientInfo, err := c.loadClientInfo()
-	if err == nil {
+	if err == nil && c.clientInfoMatchesServer(clientInfo) {
 		return clientInfo, nil
 	}
 
@@ -284,12 +324,27 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 		return nil, fmt.Errorf("failed to parse client registration response: %w", err)
 	}
 
+	if c.serverMetadata != nil {
+		clientInfoResp.RegisteredIssuer = c.serverMetadata.Issuer
+	}
+
 	// Save client info
 	if err := c.saveClientInfo(&clientInfoResp); err != nil {
 		return nil, fmt.Errorf("failed to save client info: %w", err)
 	}
 
 	return &clientInfoResp, nil
+}
+
+func (c *Coordinator) clientInfoMatchesServer(clientInfo *ClientInfo) bool {
+	if c.serverMetadata == nil || clientInfo == nil {
+		return true
+	}
+	if clientInfo.RegisteredIssuer == "" {
+		// Legacy cache entry without issuer; still usable.
+		return true
+	}
+	return clientInfo.RegisteredIssuer == c.serverMetadata.Issuer
 }
 
 // startCallbackServer starts the HTTP server to receive the OAuth callback.
@@ -383,6 +438,11 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	params.Set("scope", "mcp offline_access")
 	params.Set("code_challenge", ComputeCodeChallenge(verifier))
 	params.Set("code_challenge_method", "S256")
+
+	// RFC 8707 resource indicator (required by the MCP authorization spec).
+	if c.resource != "" {
+		params.Set("resource", c.resource)
+	}
 
 	// Combine URL
 	baseURL, err := url.Parse(c.serverMetadata.AuthorizationEndpoint)

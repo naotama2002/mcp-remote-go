@@ -166,9 +166,10 @@ func (p *Proxy) connectToServer() error {
 
 	err := t.Connect(p.ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+		var unauth *UnauthorizedError
+		if errors.As(err, &unauth) {
 			log.Println("Authentication required")
-			return p.handleAuthentication()
+			return p.handleAuthentication(unauth.WWWAuthenticate)
 		}
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -207,6 +208,7 @@ func (p *Proxy) negotiateTransport() error {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
+	wwwAuth := auth.BestWWWAuthenticateHeader(resp.Header.Values(HeaderWWWAuthenticate))
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
@@ -222,7 +224,7 @@ func (p *Proxy) negotiateTransport() error {
 
 	case resp.StatusCode == http.StatusUnauthorized:
 		log.Println("Authentication required")
-		return p.handleAuthentication()
+		return p.handleAuthentication(wwwAuth)
 
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
 		// Server does not support Streamable HTTP, fall back to SSE
@@ -249,9 +251,10 @@ func (p *Proxy) connectWithMode(mode TransportMode) error {
 
 	err := t.Connect(p.ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+		var unauth *UnauthorizedError
+		if errors.As(err, &unauth) {
 			log.Println("Authentication required")
-			return p.handleAuthentication()
+			return p.handleAuthentication(unauth.WWWAuthenticate)
 		}
 		return fmt.Errorf("failed to connect with %s transport: %w", mode, err)
 	}
@@ -296,9 +299,19 @@ func openBrowser(rawURL string) error {
 	return browser.OpenURL(rawURL)
 }
 
-// handleAuthentication handles the OAuth flow
-func (p *Proxy) handleAuthentication() error {
-	authURL, err := p.authCoord.InitializeAuth(p.serverURL)
+// handleAuthentication runs the OAuth flow. When the triggering 401 carried a
+// WWW-Authenticate Bearer challenge, its resource_metadata URL (RFC 9728 §5.1)
+// is forwarded to discovery.
+func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
+	var initOpts []auth.InitOption
+	if wwwAuthenticate != "" {
+		if challenge, ok := auth.ParseWWWAuthenticate(wwwAuthenticate); ok && challenge.ResourceMetadata != "" {
+			log.Printf("Using resource_metadata URL from WWW-Authenticate: %s", challenge.ResourceMetadata)
+			initOpts = append(initOpts, auth.WithResourceMetadataURL(challenge.ResourceMetadata))
+		}
+	}
+
+	authURL, err := p.authCoord.InitializeAuth(p.serverURL, initOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to initialize auth: %w", err)
 	}
@@ -420,9 +433,10 @@ func (p *Proxy) handleServerError(err error) {
 		return
 	}
 
-	if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+	var unauth *UnauthorizedError
+	if errors.As(err, &unauth) {
 		log.Println("Authentication error, trying to re-authenticate...")
-		if err := p.handleAuthentication(); err != nil {
+		if err := p.handleAuthentication(unauth.WWWAuthenticate); err != nil {
 			log.Printf("Re-authentication failed: %v", err)
 			p.Shutdown()
 		}
