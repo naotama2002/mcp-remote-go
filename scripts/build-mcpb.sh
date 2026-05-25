@@ -116,8 +116,7 @@ for platform in "${PLATFORMS[@]}"; do
     "custom_headers": {
       "type": "string",
       "title": "Custom Headers",
-      "description": "Additional request headers, one per line as \"Name: Value\" (e.g. \"X-API-Key: secret\\nX-Tenant: acme\"). Use the field above for the Authorization header.",
-      "multiline": true,
+      "description": "Additional request headers. Type each entry as \"Name: Value\" separated by the literal two-character sequence \\n (e.g. \"X-API-Key: secret\\nX-Tenant: acme\"). Use the field above for the Authorization header.",
       "sensitive": true
     }
   },

@@ -235,7 +235,17 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 // field. Empty lines are ignored. Lines that do not contain a colon are logged
 // and skipped so a typo in one entry does not prevent the others from being
 // applied.
+//
+// As a convenience for contexts that cannot embed real newlines in an env
+// var value (Claude Desktop's MCPB single-line text field, Windows CMD
+// double quotes, etc.), a literal "\n" two-character sequence is also
+// treated as a separator — but only when no real newline is present, so an
+// HTTP header value legitimately containing "\n" in a real-newline payload
+// is left untouched.
 func parseHeaderLines(raw string) []string {
+	if !strings.ContainsAny(raw, "\r\n") {
+		raw = strings.ReplaceAll(raw, `\n`, "\n")
+	}
 	var out []string
 	for _, line := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		line = strings.TrimSpace(line)

@@ -141,7 +141,7 @@ The easiest way to use with Claude Desktop is via the `.mcpb` extension. After i
 | Allow HTTP | Allow insecure HTTP connections | `false` |
 | HTTP/HTTPS Proxy | Proxy server URL (e.g. `http://proxy:8080`) | — |
 | Authorization Header Value | **Value portion only** — do NOT prepend `Authorization:`. Examples: `Bearer eyJhbGc...`, `Basic dXNlcjpwYXNz` | — |
-| Custom Headers | Additional headers, one per line as `Name: Value`. Use this for `X-API-Key`, tenant IDs, etc. Authorization goes in the field above. | — |
+| Custom Headers | Additional headers as `Name: Value`. Because Claude Desktop's text field is single-line, separate multiple headers with the literal two-character sequence `\n` (e.g. `X-API-Key: secret\nX-Tenant: acme`). Use this for `X-API-Key`, tenant IDs, etc.; Authorization goes in the field above. | — |
 
 #### Format notes
 
@@ -205,7 +205,22 @@ docker run --rm -it \
   ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/mcp
 ```
 
-In the **MCPB Custom Headers** field, the value is just typed line by line — no escape sequences needed.
+```cmd
+:: Windows CMD — double quotes don't expand \n, so use the literal escape
+::               and the proxy will interpret it (see "Escape fallback" below).
+set MCP_HEADERS=X-API-Key: secret\nX-Tenant: acme
+```
+
+```powershell
+# Windows PowerShell — backtick-n is the PowerShell newline escape
+$env:MCP_HEADERS = "X-API-Key: secret`nX-Tenant: acme"
+```
+
+In the **MCPB Custom Headers** field, Claude Desktop currently exposes only a single-line input, so type the literal two-character `\n` sequence between entries (e.g. `X-API-Key: secret\nX-Tenant: acme`). Once Claude Desktop ships multi-line text inputs in `user_config`, the same value can be entered as real line breaks.
+
+##### Escape fallback (literal `\n`)
+
+When the value passed to the binary contains **no real newlines**, the proxy interprets the literal two-character sequence `\n` (backslash + `n`) as a separator. This covers contexts that cannot embed real newlines: the MCPB single-line UI, Windows CMD, and plain-double-quote shells. As soon as a real newline is present, the literal `\n` is **left untouched** so a header value that legitimately contains `\n` survives unchanged.
 
 Blank lines and lines without `:` are ignored (the latter logs a warning), so a typo in one entry never blocks the others.
 

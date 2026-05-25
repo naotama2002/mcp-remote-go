@@ -454,6 +454,50 @@ func TestApplyEnvOverrides_HeadersPlusAuthHeaderCombine(t *testing.T) {
 	}
 }
 
+// TestApplyEnvOverrides_HeadersEscapedNewlineFallback covers the case where
+// the platform cannot embed real newlines in an env var (MCPB single-line
+// text field, Windows CMD double quotes, regular bash double quotes) so the
+// caller resorts to the literal "\n" two-character escape sequence.
+func TestApplyEnvOverrides_HeadersEscapedNewlineFallback(t *testing.T) {
+	t.Setenv("MCP_HEADERS", `X-A: 1\nX-B: 2\nX-C: 3`)
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-A: 1", "X-B: 2", "X-C: 3"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+// TestApplyEnvOverrides_HeadersRealNewlinePreservesLiteralBackslashN ensures
+// that when real newlines are present the literal "\n" sequence is NOT
+// reinterpreted, so a header value legitimately containing those two
+// characters survives unchanged.
+func TestApplyEnvOverrides_HeadersRealNewlinePreservesLiteralBackslashN(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-Weird: foo\\nbar\nX-Plain: ok")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{`X-Weird: foo\nbar`, "X-Plain: ok"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
 // TestApplyEnvOverrides_HeadersAuthorizationSuppressesAuthHeader verifies that
 // when MCP_HEADERS already carries an Authorization line, the legacy
 // MCP_AUTH_HEADER does not also append a duplicate.
