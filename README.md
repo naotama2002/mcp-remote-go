@@ -133,7 +133,20 @@ The easiest way to use with Claude Desktop is via the `.mcpb` extension. After i
 | OAuth Callback Port | Local port for OAuth callback | `3334` |
 | Allow HTTP | Allow insecure HTTP connections | `false` |
 | HTTP/HTTPS Proxy | Proxy server URL (e.g. `http://proxy:8080`) | — |
-| Authorization Header | Auth header value (stored securely) | — |
+| Authorization Header Value | **Value portion only** — do NOT prepend `Authorization:`. Examples: `Bearer eyJhbGc...`, `Basic dXNlcjpwYXNz` | — |
+| Custom Headers | Additional headers, one per line as `Name: Value`. Use this for `X-API-Key`, tenant IDs, etc. Authorization goes in the field above. | — |
+
+#### Format notes
+
+The same value can be entered three ways depending on how you launch the proxy. Each path uses a slightly different format:
+
+| Where | Authorization header | Other headers |
+|---|---|---|
+| MCPB UI (above) | `Authorization Header Value` field — **value only** (`Bearer xxx`) | `Custom Headers` field — `Name: Value` per line |
+| CLI `--header` (repeatable) | Full header: `--header "Authorization: Bearer xxx"` | Full header: `--header "X-API-Key: secret"` |
+| Env vars | `MCP_AUTH_HEADER="Bearer xxx"` (value only) | `MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme'` (newline-separated, full `Name: Value` per line) |
+
+If `MCP_HEADERS` already contains an `Authorization:` line, `MCP_AUTH_HEADER` is ignored to avoid duplicates.
 
 ### Claude Desktop (Manual Configuration)
 
@@ -287,7 +300,8 @@ All options can also be set via environment variables. CLI flags take precedence
 | `MCP_PORT` | OAuth callback port | `--port` |
 | `MCP_ALLOW_HTTP` | Set to `true` to allow HTTP | `--allow-http` |
 | `MCP_HTTPS_PROXY` | HTTP/HTTPS proxy URL | `--https-proxy` |
-| `MCP_AUTH_HEADER` | Authorization header value | `--header "Authorization: ..."` |
+| `MCP_AUTH_HEADER` | Authorization header **value only** (e.g. `Bearer xxx`) — the proxy prepends `Authorization:` automatically | `--header "Authorization: ..."` |
+| `MCP_HEADERS` | Newline-separated `Name: Value` list for arbitrary headers (e.g. `X-API-Key: secret`) | One `--header "Name: Value"` per entry |
 
 These environment variables are used internally by the MCPB extension to pass GUI-configured values to the binary.
 

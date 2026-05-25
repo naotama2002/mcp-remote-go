@@ -211,6 +211,11 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 	if os.Getenv("MCP_ALLOW_HTTP") == "true" && !*allowHTTP {
 		*allowHTTP = true
 	}
+	if v := os.Getenv("MCP_HEADERS"); v != "" {
+		for _, h := range parseHeaderLines(v) {
+			*headers = append(*headers, h)
+		}
+	}
 	if v := os.Getenv("MCP_AUTH_HEADER"); v != "" {
 		hasAuth := false
 		for _, h := range *headers {
@@ -223,4 +228,25 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 			*headers = append(*headers, "Authorization:"+v)
 		}
 	}
+}
+
+// parseHeaderLines parses a newline-separated list of `Name: Value` header
+// entries, as accepted by the MCP_HEADERS env var and the MCPB Custom Headers
+// field. Empty lines are ignored. Lines that do not contain a colon are logged
+// and skipped so a typo in one entry does not prevent the others from being
+// applied.
+func parseHeaderLines(raw string) []string {
+	var out []string
+	for _, line := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, ":") {
+			log.Printf("Warning: ignoring MCP_HEADERS entry without ':' separator: %q", line)
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }

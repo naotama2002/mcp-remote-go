@@ -392,3 +392,83 @@ func TestApplyEnvOverrides_AuthHeaderCLITakesPrecedence(t *testing.T) {
 		t.Errorf("Expected CLI auth header, got '%s'", headers[0])
 	}
 }
+
+func TestApplyEnvOverrides_HeadersAppendsMultiple(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-API-Key: key1\nX-Tenant: acme")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-API-Key: key1", "X-Tenant: acme"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+func TestApplyEnvOverrides_HeadersIgnoresBlanksAndInvalidLines(t *testing.T) {
+	// CRLF, blank lines, and a line without ':' should be skipped.
+	t.Setenv("MCP_HEADERS", "\r\nX-A: 1\r\n\r\nnocolon\r\nX-B: 2\r\n")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-A: 1", "X-B: 2"}
+	if len(headers) != 2 {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+func TestApplyEnvOverrides_HeadersPlusAuthHeaderCombine(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-API-Key: secret")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer token")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-API-Key: secret", "Authorization:Bearer token"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+// TestApplyEnvOverrides_HeadersAuthorizationSuppressesAuthHeader verifies that
+// when MCP_HEADERS already carries an Authorization line, the legacy
+// MCP_AUTH_HEADER does not also append a duplicate.
+func TestApplyEnvOverrides_HeadersAuthorizationSuppressesAuthHeader(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "Authorization: Bearer from-headers")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer from-auth-header")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 {
+		t.Fatalf("expected 1 header, got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization: Bearer from-headers" {
+		t.Errorf("headers[0] = %q, want %q", headers[0], "Authorization: Bearer from-headers")
+	}
+}

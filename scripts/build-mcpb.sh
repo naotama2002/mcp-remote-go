@@ -70,7 +70,8 @@ for platform in "${PLATFORMS[@]}"; do
       "env": {
         "MCP_ALLOW_HTTP": "\${user_config.allow_http}",
         "MCP_HTTPS_PROXY": "\${user_config.http_proxy}",
-        "MCP_AUTH_HEADER": "\${user_config.auth_header}"
+        "MCP_AUTH_HEADER": "\${user_config.auth_header}",
+        "MCP_HEADERS": "\${user_config.custom_headers}"
       }
     }
   },
@@ -108,8 +109,15 @@ for platform in "${PLATFORMS[@]}"; do
     },
     "auth_header": {
       "type": "string",
-      "title": "Authorization Header",
-      "description": "Custom Authorization header value (e.g. Bearer your-token-here)",
+      "title": "Authorization Header Value",
+      "description": "Value portion only — do NOT prepend \"Authorization:\". Examples: \"Bearer eyJhbGc...\" or \"Basic dXNlcjpwYXNz\".",
+      "sensitive": true
+    },
+    "custom_headers": {
+      "type": "string",
+      "title": "Custom Headers",
+      "description": "Additional request headers, one per line as \"Name: Value\" (e.g. \"X-API-Key: secret\\nX-Tenant: acme\"). Use the field above for the Authorization header.",
+      "multiline": true,
       "sensitive": true
     }
   },
