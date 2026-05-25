@@ -83,8 +83,15 @@ mcp-remote-go https://remote.mcp.server/sse --transport sse
 # With custom port for OAuth callback
 mcp-remote-go https://remote.mcp.server/mcp 9090
 
-# With custom headers (useful for auth bypass or adding auth tokens)
+# With a custom header (useful for auth tokens, API keys, etc.)
 mcp-remote-go https://remote.mcp.server/mcp --header "Authorization: Bearer YOUR_TOKEN"
+
+# Multiple headers — repeat --header as many times as needed
+# (Note: there is no --headers plural flag; `--header` takes one Name:Value at a time.)
+mcp-remote-go https://remote.mcp.server/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN" \
+  --header "X-API-Key: secret" \
+  --header "X-Tenant-Id: acme"
 
 # Allow HTTP for trusted networks (normally HTTPS is required)
 mcp-remote-go http://internal.mcp.server/mcp --allow-http
@@ -143,10 +150,64 @@ The same value can be entered three ways depending on how you launch the proxy. 
 | Where | Authorization header | Other headers |
 |---|---|---|
 | MCPB UI (above) | `Authorization Header Value` field — **value only** (`Bearer xxx`) | `Custom Headers` field — `Name: Value` per line |
-| CLI `--header` (repeatable) | Full header: `--header "Authorization: Bearer xxx"` | Full header: `--header "X-API-Key: secret"` |
-| Env vars | `MCP_AUTH_HEADER="Bearer xxx"` (value only) | `MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme'` (newline-separated, full `Name: Value` per line) |
+| CLI `--header` (repeat the flag) | `--header "Authorization: Bearer xxx"` | `--header "X-API-Key: secret"` |
+| Env vars | `MCP_AUTH_HEADER="Bearer xxx"` (value only) | `MCP_HEADERS` — newline-separated `Name: Value` per line (see examples below) |
+
+> **There is no `--headers` (plural) flag.** Pass each header as its own `--header "Name: Value"`; repeat the flag for multiple headers.
 
 If `MCP_HEADERS` already contains an `Authorization:` line, `MCP_AUTH_HEADER` is ignored to avoid duplicates.
+
+##### Writing `MCP_HEADERS` in different contexts
+
+Embedding newlines in a single env-var value looks different in each tool. All of the following set the same two headers (`X-API-Key: secret` and `X-Tenant: acme`):
+
+```bash
+# bash / zsh — $'...' is ANSI-C quoting that turns \n into a real newline
+export MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme'
+```
+
+```bash
+# Portable shell — leave the double quotes open across a real newline
+export MCP_HEADERS="X-API-Key: secret
+X-Tenant: acme"
+```
+
+```json
+// Claude Desktop manual config — JSON \n is interpreted as a real newline
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "/path/to/mcp-remote-go",
+      "args": ["https://remote.mcp.server/mcp"],
+      "env": {
+        "MCP_HEADERS": "X-API-Key: secret\nX-Tenant: acme"
+      }
+    }
+  }
+}
+```
+
+```yaml
+# docker-compose — YAML block scalar (|) preserves newlines
+services:
+  mcp-remote:
+    image: ghcr.io/naotama2002/mcp-remote-go:latest
+    environment:
+      MCP_HEADERS: |
+        X-API-Key: secret
+        X-Tenant: acme
+```
+
+```bash
+# docker run — same $'...' trick as bash/zsh
+docker run --rm -it \
+  -e MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme' \
+  ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/mcp
+```
+
+In the **MCPB Custom Headers** field, the value is just typed line by line — no escape sequences needed.
+
+Blank lines and lines without `:` are ignored (the latter logs a warning), so a typo in one entry never blocks the others.
 
 ### Claude Desktop (Manual Configuration)
 
