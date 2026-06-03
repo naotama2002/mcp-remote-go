@@ -199,7 +199,7 @@ func parseRemainingArgs(remaining []string, defaults cliConfig) cliConfig {
 // names (e.g. `invalid header field name "${user_config.header_2_name}"`).
 func mcpbEnv(name string) string {
 	v := os.Getenv(name)
-	if strings.Contains(v, "${") {
+	if strings.Contains(v, "${user_config.") {
 		return ""
 	}
 	return v
@@ -225,7 +225,7 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 	if os.Getenv("MCP_ALLOW_HTTP") == "true" && !*allowHTTP {
 		*allowHTTP = true
 	}
-	if v := os.Getenv("MCP_HEADERS"); v != "" {
+	if v := mcpbEnv("MCP_HEADERS"); v != "" {
 		for _, h := range parseHeaderLines(v) {
 			*headers = append(*headers, h)
 		}
@@ -245,7 +245,12 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 	if v := mcpbEnv("MCP_AUTH_HEADER"); v != "" {
 		hasAuth := false
 		for _, h := range *headers {
-			if strings.HasPrefix(strings.ToLower(h), "authorization:") {
+			// Compare the parsed header name rather than a string prefix:
+			// entries may carry whitespace around the colon (e.g.
+			// "Authorization : Bearer ..."), which headerMap construction
+			// later trims to the same key.
+			name, _, found := strings.Cut(h, ":")
+			if found && strings.EqualFold(strings.TrimSpace(name), "Authorization") {
 				hasAuth = true
 				break
 			}
@@ -280,7 +285,7 @@ func parseHeaderLines(raw string) []string {
 		}
 		idx := strings.Index(line, ":")
 		if idx < 0 {
-			log.Printf("Warning: ignoring MCP_HEADERS entry without ':' separator: %q", line)
+			log.Printf("Warning: ignoring header entry without ':' separator: %q", line)
 			continue
 		}
 		name := strings.TrimSpace(line[:idx])

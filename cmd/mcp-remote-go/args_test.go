@@ -567,6 +567,38 @@ func TestApplyEnvOverrides_NumberedHeaderUnsubstitutedPlaceholderSkipped(t *test
 	}
 }
 
+func TestApplyEnvOverrides_HeadersAuthorizationWithSpaceSuppressesAuthHeader(t *testing.T) {
+	// Whitespace around the colon must not defeat duplicate detection:
+	// headerMap construction trims both sides to the same "Authorization" key.
+	t.Setenv("MCP_HEADERS", "Authorization : Bearer from-headers")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer from-auth-header")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 {
+		t.Fatalf("expected 1 header, got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization : Bearer from-headers" {
+		t.Errorf("headers[0] = %q, want the MCP_HEADERS entry", headers[0])
+	}
+}
+
+func TestApplyEnvOverrides_ProxyWithNonMCPBPlaceholderKept(t *testing.T) {
+	// Only unsubstituted "${user_config.*}" templates are treated as unset;
+	// other "${...}" content is a legitimate value and must pass through.
+	t.Setenv("MCP_HTTPS_PROXY", "http://${HOST}:8080")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if httpProxy != "http://${HOST}:8080" {
+		t.Fatalf("expected proxy to pass through, got %q", httpProxy)
+	}
+}
+
 func TestApplyEnvOverrides_NumberedHeaderInvalidNameSkipped(t *testing.T) {
 	// A human-readable label typed into the header-name field (spaces are not
 	// valid in an HTTP header name) must be skipped, not crash the connection.

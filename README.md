@@ -141,7 +141,7 @@ The easiest way to use with Claude Desktop is via the `.mcpb` extension. After i
 | Allow HTTP | Allow insecure HTTP connections | `false` |
 | HTTP/HTTPS Proxy | Proxy server URL (e.g. `http://proxy:8080`) | — |
 | Authorization Header Value | **Value portion only** — do NOT prepend `Authorization:`. Examples: `Bearer eyJhbGc...`, `Basic dXNlcjpwYXNz` | — |
-| Custom Headers | Additional headers as `Name: Value`. Because Claude Desktop's text field is single-line, separate multiple headers with the literal two-character sequence `\n` (e.g. `X-API-Key: secret\nX-Tenant: acme`). Use this for `X-API-Key`, tenant IDs, etc.; Authorization goes in the field above. | — |
+| Custom Header 1–5 — Name / Value | Up to five additional headers, one per Name/Value field pair. Put the header name (e.g. `X-API-Key`) in the Name field — it stays visible so you can see which headers are configured — and the value in the Value field, which is stored encrypted and masked. Leave the Name blank to skip a row. Authorization goes in the field above. | — |
 
 #### Format notes
 
@@ -149,7 +149,7 @@ The same value can be entered three ways depending on how you launch the proxy. 
 
 | Where | Authorization header | Other headers |
 |---|---|---|
-| MCPB UI (above) | `Authorization Header Value` field — **value only** (`Bearer xxx`) | `Custom Headers` field — `Name: Value` per line |
+| MCPB UI (above) | `Authorization Header Value` field — **value only** (`Bearer xxx`) | `Custom Header N` field pairs — name and value in separate fields |
 | CLI `--header` (repeat the flag) | `--header "Authorization: Bearer xxx"` | `--header "X-API-Key: secret"` |
 | Env vars | `MCP_AUTH_HEADER="Bearer xxx"` (value only) | `MCP_HEADERS` — newline-separated `Name: Value` per line (see examples below) |
 
@@ -216,11 +216,11 @@ set MCP_HEADERS=X-API-Key: secret\nX-Tenant: acme
 $env:MCP_HEADERS = "X-API-Key: secret`nX-Tenant: acme"
 ```
 
-In the **MCPB Custom Headers** field, Claude Desktop currently exposes only a single-line input, so type the literal two-character `\n` sequence between entries (e.g. `X-API-Key: secret\nX-Tenant: acme`). Once Claude Desktop ships multi-line text inputs in `user_config`, the same value can be entered as real line breaks.
+The MCPB UI does not use `MCP_HEADERS`; each `Custom Header N` Name/Value pair is passed to the proxy separately, so no separator is needed there.
 
 ##### Escape fallback (literal `\n`)
 
-When the value passed to the binary contains **no real newlines**, the proxy interprets the literal two-character sequence `\n` (backslash + `n`) as a separator. This covers contexts that cannot embed real newlines: the MCPB single-line UI, Windows CMD, and plain-double-quote shells. As soon as a real newline is present, the literal `\n` is **left untouched** so a header value that legitimately contains `\n` survives unchanged.
+When the value passed to the binary contains **no real newlines**, the proxy interprets the literal two-character sequence `\n` (backslash + `n`) as a separator. This covers contexts that cannot embed real newlines: Windows CMD and plain-double-quote shells. As soon as a real newline is present, the literal `\n` is **left untouched** so a header value that legitimately contains `\n` survives unchanged.
 
 Blank lines and lines without `:` are ignored (the latter logs a warning), so a typo in one entry never blocks the others.
 
