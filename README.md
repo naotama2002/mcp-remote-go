@@ -83,8 +83,15 @@ mcp-remote-go https://remote.mcp.server/sse --transport sse
 # With custom port for OAuth callback
 mcp-remote-go https://remote.mcp.server/mcp 9090
 
-# With custom headers (useful for auth bypass or adding auth tokens)
+# With a custom header (useful for auth tokens, API keys, etc.)
 mcp-remote-go https://remote.mcp.server/mcp --header "Authorization: Bearer YOUR_TOKEN"
+
+# Multiple headers — repeat --header as many times as needed
+# (Note: there is no --headers plural flag; `--header` takes one Name:Value at a time.)
+mcp-remote-go https://remote.mcp.server/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN" \
+  --header "X-API-Key: secret" \
+  --header "X-Tenant-Id: acme"
 
 # Allow HTTP for trusted networks (normally HTTPS is required)
 mcp-remote-go http://internal.mcp.server/mcp --allow-http
@@ -133,7 +140,89 @@ The easiest way to use with Claude Desktop is via the `.mcpb` extension. After i
 | OAuth Callback Port | Local port for OAuth callback | `3334` |
 | Allow HTTP | Allow insecure HTTP connections | `false` |
 | HTTP/HTTPS Proxy | Proxy server URL (e.g. `http://proxy:8080`) | — |
-| Authorization Header | Auth header value (stored securely) | — |
+| Authorization Header Value | **Value portion only** — do NOT prepend `Authorization:`. Examples: `Bearer eyJhbGc...`, `Basic dXNlcjpwYXNz` | — |
+| Custom Header 1–5 — Name / Value | Up to five additional headers, one per Name/Value field pair. Put the header name (e.g. `X-API-Key`) in the Name field — it stays visible so you can see which headers are configured — and the value in the Value field, which is stored encrypted and masked. Leave the Name blank to skip a row. Authorization goes in the field above. | — |
+
+#### Format notes
+
+The same value can be entered three ways depending on how you launch the proxy. Each path uses a slightly different format:
+
+| Where | Authorization header | Other headers |
+|---|---|---|
+| MCPB UI (above) | `Authorization Header Value` field — **value only** (`Bearer xxx`) | `Custom Header N` field pairs — name and value in separate fields |
+| CLI `--header` (repeat the flag) | `--header "Authorization: Bearer xxx"` | `--header "X-API-Key: secret"` |
+| Env vars | `MCP_AUTH_HEADER="Bearer xxx"` (value only) | `MCP_HEADERS` — newline-separated `Name: Value` per line (see examples below) |
+
+> **There is no `--headers` (plural) flag.** Pass each header as its own `--header "Name: Value"`; repeat the flag for multiple headers.
+
+If `MCP_HEADERS` already contains an `Authorization:` line, `MCP_AUTH_HEADER` is ignored to avoid duplicates.
+
+##### Writing `MCP_HEADERS` in different contexts
+
+Embedding newlines in a single env-var value looks different in each tool. All of the following set the same two headers (`X-API-Key: secret` and `X-Tenant: acme`):
+
+```bash
+# bash / zsh — $'...' is ANSI-C quoting that turns \n into a real newline
+export MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme'
+```
+
+```bash
+# Portable shell — leave the double quotes open across a real newline
+export MCP_HEADERS="X-API-Key: secret
+X-Tenant: acme"
+```
+
+```json
+// Claude Desktop manual config — JSON \n is interpreted as a real newline
+{
+  "mcpServers": {
+    "remote-example": {
+      "command": "/path/to/mcp-remote-go",
+      "args": ["https://remote.mcp.server/mcp"],
+      "env": {
+        "MCP_HEADERS": "X-API-Key: secret\nX-Tenant: acme"
+      }
+    }
+  }
+}
+```
+
+```yaml
+# docker-compose — YAML block scalar (|) preserves newlines
+services:
+  mcp-remote:
+    image: ghcr.io/naotama2002/mcp-remote-go:latest
+    environment:
+      MCP_HEADERS: |
+        X-API-Key: secret
+        X-Tenant: acme
+```
+
+```bash
+# docker run — same $'...' trick as bash/zsh
+docker run --rm -it \
+  -e MCP_HEADERS=$'X-API-Key: secret\nX-Tenant: acme' \
+  ghcr.io/naotama2002/mcp-remote-go:latest https://remote.mcp.server/mcp
+```
+
+```cmd
+:: Windows CMD — double quotes don't expand \n, so use the literal escape
+::               and the proxy will interpret it (see "Escape fallback" below).
+set MCP_HEADERS=X-API-Key: secret\nX-Tenant: acme
+```
+
+```powershell
+# Windows PowerShell — backtick-n is the PowerShell newline escape
+$env:MCP_HEADERS = "X-API-Key: secret`nX-Tenant: acme"
+```
+
+The MCPB UI does not use `MCP_HEADERS`; each `Custom Header N` Name/Value pair is passed to the proxy separately, so no separator is needed there.
+
+##### Escape fallback (literal `\n`)
+
+When the value passed to the binary contains **no real newlines**, the proxy interprets the literal two-character sequence `\n` (backslash + `n`) as a separator. This covers contexts that cannot embed real newlines: Windows CMD and plain-double-quote shells. As soon as a real newline is present, the literal `\n` is **left untouched** so a header value that legitimately contains `\n` survives unchanged.
+
+Blank lines and lines without `:` are ignored (the latter logs a warning), so a typo in one entry never blocks the others.
 
 ### Claude Desktop (Manual Configuration)
 
@@ -287,7 +376,8 @@ All options can also be set via environment variables. CLI flags take precedence
 | `MCP_PORT` | OAuth callback port | `--port` |
 | `MCP_ALLOW_HTTP` | Set to `true` to allow HTTP | `--allow-http` |
 | `MCP_HTTPS_PROXY` | HTTP/HTTPS proxy URL | `--https-proxy` |
-| `MCP_AUTH_HEADER` | Authorization header value | `--header "Authorization: ..."` |
+| `MCP_AUTH_HEADER` | Authorization header **value only** (e.g. `Bearer xxx`) — the proxy prepends `Authorization:` automatically | `--header "Authorization: ..."` |
+| `MCP_HEADERS` | Newline-separated `Name: Value` list for arbitrary headers (e.g. `X-API-Key: secret`) | One `--header "Name: Value"` per entry |
 
 These environment variables are used internally by the MCPB extension to pass GUI-configured values to the binary.
 

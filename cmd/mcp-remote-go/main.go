@@ -191,30 +191,66 @@ func parseRemainingArgs(remaining []string, defaults cliConfig) cliConfig {
 }
 
 // applyEnvOverrides reads environment variables and applies them as overrides.
+// mcpbEnv reads an environment variable populated by MCPB user_config
+// substitution. When an optional user_config field is left blank, the host
+// (Claude Desktop) does not substitute it and the literal "${user_config.NAME}"
+// template string reaches the process instead of an empty value. Such values
+// must be treated as unset, otherwise they leak into proxy URLs and header
+// names (e.g. `invalid header field name "${user_config.header_2_name}"`).
+func mcpbEnv(name string) string {
+	v := os.Getenv(name)
+	if strings.Contains(v, "${user_config.") {
+		return ""
+	}
+	return v
+}
+
 // Environment variables are used by MCPB user_config to pass GUI-configured values.
 // CLI flags take precedence; env vars only apply when the corresponding flag is at its default.
 func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, transportMode *string, httpProxy *string, headers *flagList) {
-	if v := os.Getenv("MCP_SERVER_URL"); v != "" && *serverURL == "" {
+	if v := mcpbEnv("MCP_SERVER_URL"); v != "" && *serverURL == "" {
 		*serverURL = v
 	}
-	if v := os.Getenv("MCP_TRANSPORT"); v != "" && *transportMode == "auto" {
+	if v := mcpbEnv("MCP_TRANSPORT"); v != "" && *transportMode == "auto" {
 		*transportMode = v
 	}
-	if v := os.Getenv("MCP_PORT"); v != "" && *callbackPort == 3334 {
+	if v := mcpbEnv("MCP_PORT"); v != "" && *callbackPort == 3334 {
 		if _, err := fmt.Sscanf(v, "%d", callbackPort); err != nil {
 			log.Printf("Warning: failed to parse MCP_PORT: %v", err)
 		}
 	}
-	if v := os.Getenv("MCP_HTTPS_PROXY"); v != "" && *httpProxy == "" {
+	if v := mcpbEnv("MCP_HTTPS_PROXY"); v != "" && *httpProxy == "" {
 		*httpProxy = v
 	}
 	if os.Getenv("MCP_ALLOW_HTTP") == "true" && !*allowHTTP {
 		*allowHTTP = true
 	}
-	if v := os.Getenv("MCP_AUTH_HEADER"); v != "" {
+	if v := mcpbEnv("MCP_HEADERS"); v != "" {
+		for _, h := range parseHeaderLines(v) {
+			*headers = append(*headers, h)
+		}
+	}
+	// MCP_HEADER_1..MCP_HEADER_5 carry one `Name: Value` entry each. They back
+	// the per-row Custom Header fields in the MCPB manifest, where the value
+	// portion is marked sensitive. Unused rows arrive either empty, as a bare
+	// ":" (only the value field filled), or with unsubstituted "${...}"
+	// placeholders — mcpbEnv drops the last case and parseHeaderLines the rest.
+	for i := 1; i <= 5; i++ {
+		if v := mcpbEnv(fmt.Sprintf("MCP_HEADER_%d", i)); v != "" {
+			for _, h := range parseHeaderLines(v) {
+				*headers = append(*headers, h)
+			}
+		}
+	}
+	if v := mcpbEnv("MCP_AUTH_HEADER"); v != "" {
 		hasAuth := false
 		for _, h := range *headers {
-			if strings.HasPrefix(strings.ToLower(h), "authorization:") {
+			// Compare the parsed header name rather than a string prefix:
+			// entries may carry whitespace around the colon (e.g.
+			// "Authorization : Bearer ..."), which headerMap construction
+			// later trims to the same key.
+			name, _, found := strings.Cut(h, ":")
+			if found && strings.EqualFold(strings.TrimSpace(name), "Authorization") {
 				hasAuth = true
 				break
 			}
@@ -223,4 +259,67 @@ func applyEnvOverrides(serverURL *string, callbackPort *int, allowHTTP *bool, tr
 			*headers = append(*headers, "Authorization:"+v)
 		}
 	}
+}
+
+// parseHeaderLines parses a newline-separated list of `Name: Value` header
+// entries, as accepted by the MCP_HEADERS and MCP_HEADER_1..5 env vars. Empty
+// lines and lines with an empty header name are ignored. Lines that do not
+// contain a colon are logged and skipped so a typo in one entry does not
+// prevent the others from being applied.
+//
+// As a convenience for contexts that cannot embed real newlines in an env
+// var value (Claude Desktop's MCPB single-line text field, Windows CMD
+// double quotes, etc.), a literal "\n" two-character sequence is also
+// treated as a separator — but only when no real newline is present, so an
+// HTTP header value legitimately containing "\n" in a real-newline payload
+// is left untouched.
+func parseHeaderLines(raw string) []string {
+	if !strings.ContainsAny(raw, "\r\n") {
+		raw = strings.ReplaceAll(raw, `\n`, "\n")
+	}
+	var out []string
+	for _, line := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx < 0 {
+			log.Printf("Warning: ignoring header entry without ':' separator: %q", line)
+			continue
+		}
+		name := strings.TrimSpace(line[:idx])
+		if name == "" {
+			// Empty header name, e.g. an unused MCPB row where only the
+			// sensitive value field was filled in. Skip silently.
+			continue
+		}
+		if !isValidHeaderName(name) {
+			// e.g. a human-readable label like "Redash API Key" typed into the
+			// header-name field. Sending it would make net/http reject the whole
+			// request, so skip this entry and keep the others.
+			log.Printf("Warning: ignoring header entry with invalid header name %q (HTTP header names cannot contain spaces or special characters)", name)
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// isValidHeaderName reports whether name is a valid RFC 7230 header field name
+// (a non-empty "token": ASCII letters, digits, and a limited set of symbols,
+// with no spaces or control characters).
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }

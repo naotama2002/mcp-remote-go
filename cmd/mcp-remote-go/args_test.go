@@ -392,3 +392,248 @@ func TestApplyEnvOverrides_AuthHeaderCLITakesPrecedence(t *testing.T) {
 		t.Errorf("Expected CLI auth header, got '%s'", headers[0])
 	}
 }
+
+func TestApplyEnvOverrides_HeadersAppendsMultiple(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-API-Key: key1\nX-Tenant: acme")
+
+	serverURL := ""
+	port := 3334
+	allowHTTP := false
+	transport := "auto"
+	httpProxy := ""
+	headers := flagList{}
+
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-API-Key: key1", "X-Tenant: acme"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+func TestApplyEnvOverrides_HeadersIgnoresBlanksAndInvalidLines(t *testing.T) {
+	// CRLF, blank lines, and a line without ':' should be skipped.
+	t.Setenv("MCP_HEADERS", "\r\nX-A: 1\r\n\r\nnocolon\r\nX-B: 2\r\n")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-A: 1", "X-B: 2"}
+	if len(headers) != 2 {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+func TestApplyEnvOverrides_HeadersPlusAuthHeaderCombine(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-API-Key: secret")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer token")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-API-Key: secret", "Authorization:Bearer token"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+// TestApplyEnvOverrides_HeadersEscapedNewlineFallback covers the case where
+// the platform cannot embed real newlines in an env var (MCPB single-line
+// text field, Windows CMD double quotes, regular bash double quotes) so the
+// caller resorts to the literal "\n" two-character escape sequence.
+func TestApplyEnvOverrides_HeadersEscapedNewlineFallback(t *testing.T) {
+	t.Setenv("MCP_HEADERS", `X-A: 1\nX-B: 2\nX-C: 3`)
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-A: 1", "X-B: 2", "X-C: 3"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+// TestApplyEnvOverrides_HeadersRealNewlinePreservesLiteralBackslashN ensures
+// that when real newlines are present the literal "\n" sequence is NOT
+// reinterpreted, so a header value legitimately containing those two
+// characters survives unchanged.
+func TestApplyEnvOverrides_HeadersRealNewlinePreservesLiteralBackslashN(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "X-Weird: foo\\nbar\nX-Plain: ok")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{`X-Weird: foo\nbar`, "X-Plain: ok"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+// TestApplyEnvOverrides_HeadersAuthorizationSuppressesAuthHeader verifies that
+// when MCP_HEADERS already carries an Authorization line, the legacy
+// MCP_AUTH_HEADER does not also append a duplicate.
+func TestApplyEnvOverrides_HeadersAuthorizationSuppressesAuthHeader(t *testing.T) {
+	t.Setenv("MCP_HEADERS", "Authorization: Bearer from-headers")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer from-auth-header")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 {
+		t.Fatalf("expected 1 header, got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization: Bearer from-headers" {
+		t.Errorf("headers[0] = %q, want %q", headers[0], "Authorization: Bearer from-headers")
+	}
+}
+
+func TestApplyEnvOverrides_NumberedHeadersAppend(t *testing.T) {
+	// MCPB per-row Custom Header fields arrive as MCP_HEADER_1..5.
+	t.Setenv("MCP_HEADER_1", "X-API-Key: key1")
+	t.Setenv("MCP_HEADER_3", "X-Tenant: acme")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	want := []string{"X-API-Key: key1", "X-Tenant: acme"}
+	if len(headers) != len(want) {
+		t.Fatalf("got %d headers, want %d: %v", len(headers), len(want), headers)
+	}
+	for i, h := range want {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
+}
+
+func TestApplyEnvOverrides_NumberedHeaderEmptyNameSkipped(t *testing.T) {
+	// An unused MCPB row where only the sensitive value field was filled
+	// arrives as a bare ":value" and must not produce an empty-name header.
+	t.Setenv("MCP_HEADER_1", ": orphan-value")
+	t.Setenv("MCP_HEADER_2", "X-Real: ok")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 || headers[0] != "X-Real: ok" {
+		t.Fatalf("expected only the named header, got %v", headers)
+	}
+}
+
+func TestApplyEnvOverrides_NumberedHeaderUnsubstitutedPlaceholderSkipped(t *testing.T) {
+	// Claude Desktop leaves "${user_config.NAME}" literally in place when an
+	// optional field is blank. Such rows must be ignored, not sent as headers.
+	t.Setenv("MCP_HEADER_1", "${user_config.header_1_name}: ${user_config.header_1_value}")
+	t.Setenv("MCP_HEADER_2", "X-Real: ok")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 || headers[0] != "X-Real: ok" {
+		t.Fatalf("expected only the resolved header, got %v", headers)
+	}
+}
+
+func TestApplyEnvOverrides_HeadersAuthorizationWithSpaceSuppressesAuthHeader(t *testing.T) {
+	// Whitespace around the colon must not defeat duplicate detection:
+	// headerMap construction trims both sides to the same "Authorization" key.
+	t.Setenv("MCP_HEADERS", "Authorization : Bearer from-headers")
+	t.Setenv("MCP_AUTH_HEADER", "Bearer from-auth-header")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 {
+		t.Fatalf("expected 1 header, got %d: %v", len(headers), headers)
+	}
+	if headers[0] != "Authorization : Bearer from-headers" {
+		t.Errorf("headers[0] = %q, want the MCP_HEADERS entry", headers[0])
+	}
+}
+
+func TestApplyEnvOverrides_ProxyWithNonMCPBPlaceholderKept(t *testing.T) {
+	// Only unsubstituted "${user_config.*}" templates are treated as unset;
+	// other "${...}" content is a legitimate value and must pass through.
+	t.Setenv("MCP_HTTPS_PROXY", "http://${HOST}:8080")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if httpProxy != "http://${HOST}:8080" {
+		t.Fatalf("expected proxy to pass through, got %q", httpProxy)
+	}
+}
+
+func TestApplyEnvOverrides_NumberedHeaderInvalidNameSkipped(t *testing.T) {
+	// A human-readable label typed into the header-name field (spaces are not
+	// valid in an HTTP header name) must be skipped, not crash the connection.
+	t.Setenv("MCP_HEADER_1", "Redash API Key: secret-token")
+	t.Setenv("MCP_HEADER_2", "X-Redash-API-Key: secret-token")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 1 || headers[0] != "X-Redash-API-Key: secret-token" {
+		t.Fatalf("expected only the valid header, got %v", headers)
+	}
+}
+
+func TestApplyEnvOverrides_ProxyUnsubstitutedPlaceholderSkipped(t *testing.T) {
+	t.Setenv("MCP_HTTPS_PROXY", "${user_config.http_proxy}")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if httpProxy != "" {
+		t.Fatalf("expected proxy to stay unset, got %q", httpProxy)
+	}
+}
+
+func TestApplyEnvOverrides_AuthHeaderUnsubstitutedPlaceholderSkipped(t *testing.T) {
+	t.Setenv("MCP_AUTH_HEADER", "${user_config.auth_header}")
+
+	headers := flagList{}
+	serverURL, port, allowHTTP, transport, httpProxy := "", 3334, false, "auto", ""
+	applyEnvOverrides(&serverURL, &port, &allowHTTP, &transport, &httpProxy, &headers)
+
+	if len(headers) != 0 {
+		t.Fatalf("expected no headers, got %v", headers)
+	}
+}

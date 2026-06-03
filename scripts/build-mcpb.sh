@@ -70,7 +70,12 @@ for platform in "${PLATFORMS[@]}"; do
       "env": {
         "MCP_ALLOW_HTTP": "\${user_config.allow_http}",
         "MCP_HTTPS_PROXY": "\${user_config.http_proxy}",
-        "MCP_AUTH_HEADER": "\${user_config.auth_header}"
+        "MCP_AUTH_HEADER": "\${user_config.auth_header}",
+        "MCP_HEADER_1": "\${user_config.header_1_name}: \${user_config.header_1_value}",
+        "MCP_HEADER_2": "\${user_config.header_2_name}: \${user_config.header_2_value}",
+        "MCP_HEADER_3": "\${user_config.header_3_name}: \${user_config.header_3_value}",
+        "MCP_HEADER_4": "\${user_config.header_4_name}: \${user_config.header_4_value}",
+        "MCP_HEADER_5": "\${user_config.header_5_name}: \${user_config.header_5_value}"
       }
     }
   },
@@ -108,8 +113,63 @@ for platform in "${PLATFORMS[@]}"; do
     },
     "auth_header": {
       "type": "string",
-      "title": "Authorization Header",
-      "description": "Custom Authorization header value (e.g. Bearer your-token-here)",
+      "title": "Authorization Header Value",
+      "description": "Value portion only — do NOT prepend \"Authorization:\". Examples: \"Bearer eyJhbGc...\" or \"Basic dXNlcjpwYXNz\".",
+      "sensitive": true
+    },
+    "header_1_name": {
+      "type": "string",
+      "title": "Custom Header 1 — Name",
+      "description": "Header name, e.g. X-API-Key. Leave blank to skip this row."
+    },
+    "header_1_value": {
+      "type": "string",
+      "title": "Custom Header 1 — Value",
+      "description": "Header value for the name above. Hidden after entry.",
+      "sensitive": true
+    },
+    "header_2_name": {
+      "type": "string",
+      "title": "Custom Header 2 — Name",
+      "description": "Header name, e.g. X-Tenant. Leave blank to skip this row."
+    },
+    "header_2_value": {
+      "type": "string",
+      "title": "Custom Header 2 — Value",
+      "description": "Header value for the name above. Hidden after entry.",
+      "sensitive": true
+    },
+    "header_3_name": {
+      "type": "string",
+      "title": "Custom Header 3 — Name",
+      "description": "Header name. Leave blank to skip this row."
+    },
+    "header_3_value": {
+      "type": "string",
+      "title": "Custom Header 3 — Value",
+      "description": "Header value for the name above. Hidden after entry.",
+      "sensitive": true
+    },
+    "header_4_name": {
+      "type": "string",
+      "title": "Custom Header 4 — Name",
+      "description": "Header name. Leave blank to skip this row."
+    },
+    "header_4_value": {
+      "type": "string",
+      "title": "Custom Header 4 — Value",
+      "description": "Header value for the name above. Hidden after entry.",
+      "sensitive": true
+    },
+    "header_5_name": {
+      "type": "string",
+      "title": "Custom Header 5 — Name",
+      "description": "Header name. Leave blank to skip this row."
+    },
+    "header_5_value": {
+      "type": "string",
+      "title": "Custom Header 5 — Value",
+      "description": "Header value for the name above. Hidden after entry.",
       "sensitive": true
     }
   },
