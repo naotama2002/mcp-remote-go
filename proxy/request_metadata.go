@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +37,11 @@ const (
 	// header values that cannot be represented as plain ASCII.
 	base64Prefix = "=?base64?"
 	base64Suffix = "?="
+
+	// methodCancelled is the notification a client sends to abandon a request.
+	// From 2026-07-28 it is a stdio-only message: on Streamable HTTP the
+	// cancellation signal is closing the request's response stream.
+	methodCancelled = "notifications/cancelled"
 )
 
 // requestMetadata is the subset of an outgoing JSON-RPC message that the
@@ -55,6 +61,35 @@ type requestMetadata struct {
 	// initializeVersion is `params.protocolVersion` on a legacy `initialize`
 	// request, i.e. the version the local client is asking the server for.
 	initializeVersion string
+
+	// id identifies this request among those in flight, in the canonical form
+	// produced by requestKey. Empty for notifications.
+	id string
+
+	// cancelTarget is the id named by `params.requestId` on a
+	// notifications/cancelled message, in the same canonical form.
+	cancelTarget string
+}
+
+// requestKey renders a JSON-RPC id as a comparable key. JSON-RPC ids may be
+// numbers or strings and the two are distinct, so the type is part of the key:
+// otherwise cancelling id "1" would also cancel id 1.
+func requestKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return "s:" + v
+	case float64:
+		return "n:" + strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		return ""
+	}
 }
 
 // isModern reports whether the message declares a revision that requires the
@@ -70,13 +105,14 @@ func (m requestMetadata) isModern() bool {
 func parseRequestMetadata(message []byte) requestMetadata {
 	var envelope struct {
 		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(message, &envelope); err != nil {
 		return requestMetadata{}
 	}
 
-	md := requestMetadata{method: envelope.Method}
+	md := requestMetadata{method: envelope.Method, id: requestKey(envelope.ID)}
 	if len(envelope.Params) == 0 {
 		return md
 	}
@@ -85,6 +121,7 @@ func parseRequestMetadata(message []byte) requestMetadata {
 		Name            string          `json:"name"`
 		URI             string          `json:"uri"`
 		ProtocolVersion string          `json:"protocolVersion"`
+		RequestID       json.RawMessage `json:"requestId"`
 		Meta            json.RawMessage `json:"_meta"`
 	}
 	if err := json.Unmarshal(envelope.Params, &params); err != nil {
@@ -93,6 +130,9 @@ func parseRequestMetadata(message []byte) requestMetadata {
 	}
 
 	md.initializeVersion = params.ProtocolVersion
+	if envelope.Method == methodCancelled {
+		md.cancelTarget = requestKey(params.RequestID)
+	}
 
 	// The spec fixes the source field per method rather than falling back
 	// between them, so an unexpected `name` on resources/read is not mirrored.

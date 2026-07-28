@@ -53,6 +53,12 @@ type StreamableHTTPTransport struct {
 	// known to have dropped it.
 	skipNotificationStream bool
 
+	// inflight maps a request id to the cancel func of its response stream.
+	// Each request on this transport has its own stream, and closing that
+	// stream is how the request is cancelled, so cancellation needs the
+	// streams to be addressable one at a time.
+	inflight map[string]context.CancelFunc
+
 	notifyCancel context.CancelFunc
 	mu           sync.Mutex
 }
@@ -79,6 +85,7 @@ func NewStreamableHTTPTransport(cfg StreamableHTTPTransportConfig) *StreamableHT
 		getAuthToken:           cfg.GetAuthToken,
 		skipNotificationStream: cfg.SkipNotificationStream,
 		protocolVersion:        MCPProtocolVersion,
+		inflight:               make(map[string]context.CancelFunc),
 	}
 }
 
@@ -97,8 +104,18 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 	md := parseRequestMetadata(message)
 	t.observeProtocolVersion(md)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint, bytes.NewReader(message))
+	if handled := t.handleCancellation(md); handled {
+		return nil
+	}
+
+	// Give each request its own context so its response stream can be closed
+	// without disturbing the others. The context outlives Send: an SSE
+	// response is read by a goroutine that keeps running after we return.
+	reqCtx, cancel := context.WithCancel(ctx)
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, t.endpoint, bytes.NewReader(message))
 	if err != nil {
+		cancel()
 		return fmt.Errorf("failed to create POST request: %w", err)
 	}
 
@@ -108,6 +125,7 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 
 	resp, err := t.client.Do(req)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("POST request failed: %w", err)
 	}
 
@@ -121,8 +139,24 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 	contentType := resp.Header.Get("Content-Type")
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return unauthorizedFromResponse(resp)
+		// unauthorizedFromResponse drains and closes the body, so the request
+		// context is finished with by the time it returns.
+		unauthErr := unauthorizedFromResponse(resp)
+		cancel()
+		return unauthErr
 	}
+
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		// This stream is the response to this request. Its context must
+		// outlive Send, and stays addressable so a later cancellation can
+		// close it -- which is what tells the server to stop the work.
+		t.trackInflight(md.id, cancel)
+		go t.readSSEResponse(reqCtx, resp, md.id)
+		return nil
+	}
+
+	// Every other outcome is complete once this function returns.
+	defer cancel()
 
 	switch {
 	case resp.StatusCode == http.StatusAccepted:
@@ -130,11 +164,6 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 		if err := resp.Body.Close(); err != nil {
 			log.Printf("Warning: failed to close response body: %v", err)
 		}
-		return nil
-
-	case strings.HasPrefix(contentType, "text/event-stream"):
-		// SSE stream response - read events in background
-		go t.readSSEResponse(ctx, resp)
 		return nil
 
 	case strings.HasPrefix(contentType, "application/json"):
@@ -188,6 +217,17 @@ func (t *StreamableHTTPTransport) Close() error {
 		t.notifyCancel()
 	}
 
+	// Close every response stream still open. Each close is read by the server
+	// as cancellation of that request, which is the right message to send when
+	// the proxy is going away.
+	t.mu.Lock()
+	inflight := t.inflight
+	t.inflight = make(map[string]context.CancelFunc)
+	t.mu.Unlock()
+	for _, cancel := range inflight {
+		cancel()
+	}
+
 	// Send DELETE to terminate the session. Only legacy servers mint session
 	// IDs, so this is naturally skipped on 2026-07-28 and later.
 	t.mu.Lock()
@@ -218,6 +258,69 @@ func (t *StreamableHTTPTransport) SessionID() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.sessionID
+}
+
+// handleCancellation deals with a notifications/cancelled message and reports
+// whether it consumed it.
+//
+// From 2026-07-28 the cancellation signal on this transport is closing the
+// request's response stream, and notifications/cancelled is a stdio-only
+// message that the server does not expect to receive. So for a modern client
+// the notification is translated into a stream close and not forwarded; for a
+// legacy client, whose revision did expect it on the wire, it is passed
+// through untouched.
+func (t *StreamableHTTPTransport) handleCancellation(md requestMetadata) bool {
+	if md.method != methodCancelled {
+		return false
+	}
+
+	t.mu.Lock()
+	modern := t.protocolVersion >= ProtocolVersion20260728
+	t.mu.Unlock()
+
+	if !modern {
+		return false
+	}
+
+	if md.cancelTarget == "" {
+		// Nothing identifies the request to stop, so there is nothing to do
+		// and nothing worth sending.
+		log.Println("Ignoring notifications/cancelled with no requestId")
+		return true
+	}
+
+	if cancel := t.releaseInflight(md.cancelTarget); cancel != nil {
+		log.Printf("Cancelling request %s by closing its response stream", md.cancelTarget)
+		cancel()
+	}
+	return true
+}
+
+// trackInflight records the cancel func for a request's response stream. A
+// notification has no id and so cannot be cancelled individually.
+func (t *StreamableHTTPTransport) trackInflight(id string, cancel context.CancelFunc) {
+	if id == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.inflight[id] = cancel
+}
+
+// releaseInflight removes a request from the table and returns its cancel
+// func, or nil if it was not there.
+func (t *StreamableHTTPTransport) releaseInflight(id string) context.CancelFunc {
+	if id == "" {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cancel, ok := t.inflight[id]
+	if !ok {
+		return nil
+	}
+	delete(t.inflight, id)
+	return cancel
 }
 
 // observeProtocolVersion records the revision the local client is speaking.
@@ -378,9 +481,16 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 	})
 }
 
-// readSSEResponse reads SSE events from a POST response body.
-func (t *StreamableHTTPTransport) readSSEResponse(ctx context.Context, resp *http.Response) {
+// readSSEResponse reads SSE events from a POST response body. It owns the
+// request's slot in the inflight table for as long as the stream is open.
+func (t *StreamableHTTPTransport) readSSEResponse(ctx context.Context, resp *http.Response, id string) {
 	defer func() {
+		// The stream is over, so nothing is left to cancel. Releasing the
+		// cancel func here is also what keeps the table from growing for the
+		// lifetime of the process.
+		if cancel := t.releaseInflight(id); cancel != nil {
+			cancel()
+		}
 		if err := resp.Body.Close(); err != nil {
 			log.Printf("Warning: failed to close response body: %v", err)
 		}

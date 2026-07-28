@@ -103,6 +103,91 @@ func TestParseRequestMetadata(t *testing.T) {
 	}
 }
 
+func TestRequestKey(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"integer id", `1`, "n:1"},
+		{"large integer id", `9007199254740991`, "n:9007199254740991"},
+		{"string id", `"abc"`, "s:abc"},
+		{"absent id", ``, ""},
+		{"null id", `null`, ""},
+		{"object id is not a valid id", `{"a":1}`, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := requestKey([]byte(tt.raw)); got != tt.want {
+				t.Errorf("requestKey(%s) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+
+	// JSON-RPC treats the number 1 and the string "1" as different ids, so
+	// cancelling one must never reach the other.
+	if requestKey([]byte(`1`)) == requestKey([]byte(`"1"`)) {
+		t.Error("numeric and string ids collide")
+	}
+}
+
+func TestParseRequestMetadataCancellation(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    string
+		wantTarget string
+	}{
+		{
+			name:       "numeric requestId",
+			message:    `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7,"reason":"user"}}`,
+			wantTarget: "n:7",
+		},
+		{
+			name:       "string requestId",
+			message:    `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-7"}}`,
+			wantTarget: "s:req-7",
+		},
+		{
+			name:       "missing requestId",
+			message:    `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}`,
+			wantTarget: "",
+		},
+		{
+			name:       "requestId on another method is not a cancellation target",
+			message:    `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x","requestId":7}}`,
+			wantTarget: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := parseRequestMetadata([]byte(tt.message))
+			if md.cancelTarget != tt.wantTarget {
+				t.Errorf("cancelTarget = %q, want %q", md.cancelTarget, tt.wantTarget)
+			}
+		})
+	}
+}
+
+func TestParseRequestMetadataID(t *testing.T) {
+	tests := []struct {
+		message string
+		want    string
+	}{
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "n:1"},
+		{`{"jsonrpc":"2.0","id":"a","method":"tools/list"}`, "s:a"},
+		{`{"jsonrpc":"2.0","method":"notifications/progress"}`, ""},
+	}
+
+	for _, tt := range tests {
+		md := parseRequestMetadata([]byte(tt.message))
+		if md.id != tt.want {
+			t.Errorf("parseRequestMetadata(%s).id = %q, want %q", tt.message, md.id, tt.want)
+		}
+	}
+}
+
 func TestRequestMetadataIsModern(t *testing.T) {
 	tests := []struct {
 		version string
