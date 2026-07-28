@@ -62,19 +62,19 @@ clean:
 # Run unit tests (excludes browser tests that may open actual browsers)
 test-unit:
 	@echo "Running unit tests..."
-	go test -v ./... -short
+	go test -race -v ./... -short
 
 # Run all tests including integration tests (may open browsers)
 test-integration:
 	@echo "Running integration tests (may open browsers)..."
-	go test -v ./...
+	go test -race -v ./...
 
 # Run conformance tests against a server built from the official MCP Go SDK.
 # The SDK is an independent implementation of the spec, so these catch places
 # where our reading of it is wrong -- something our own unit tests cannot do.
 test-conformance:
 	@echo "Running spec conformance tests against the official MCP SDK..."
-	cd ${CONFORMANCE_DIR} && go test -v ./...
+	cd ${CONFORMANCE_DIR} && go test -race -v ./...
 
 # Run tests (defaults to unit tests for CI safety)
 test: test-unit-safe
@@ -82,10 +82,10 @@ test: test-unit-safe
 # Run only safe unit tests (excludes integration tests)
 test-unit-safe:
 	@echo "Running safe unit tests..."
-	go test -v ./auth -short -skip "Integration|Concurrent|Callback"
-	go test -v ./proxy -short -skip "Integration|Concurrent|Graceful|Reconnection|ProxyConnection|ProxyWith|ProxyError|ProxySend|Browser"
-	go test -v ./cmd/mcp-remote-go -short
-	go test -v ./internal/... -short
+	go test -race -v ./auth -short -skip "Integration|Concurrent|Callback"
+	go test -race -v ./proxy -short -skip "Integration|Concurrent|Graceful|Reconnection|ProxyConnection|ProxyWith|ProxyError|ProxySend|Browser"
+	go test -race -v ./cmd/mcp-remote-go -short
+	go test -race -v ./internal/... -short
 
 # Run all checks (fmt, vet, lint)
 check: fmt vet lint

@@ -47,7 +47,47 @@ type Proxy struct {
 	stdioReader   *bufio.Reader
 	stdioWriter   *bufio.Writer
 	writerMu      sync.Mutex
-	wg            sync.WaitGroup
+	// stateMu guards transport, transportMode and serverProfile. Reconnection
+	// runs on the transport's error callback goroutine and replaces all three
+	// while the stdio reader is using them.
+	stateMu sync.RWMutex
+	wg      sync.WaitGroup
+}
+
+// currentTransport returns the active transport, or nil if none is connected.
+func (p *Proxy) currentTransport() Transport {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.transport
+}
+
+// currentTransportMode returns the transport mode in use.
+func (p *Proxy) currentTransportMode() TransportMode {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.transportMode
+}
+
+// currentProfile returns what negotiation learned about the server.
+func (p *Proxy) currentProfile() serverProfile {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.serverProfile
+}
+
+// setActiveTransport records the connected transport and the mode it speaks.
+func (p *Proxy) setActiveTransport(t Transport, mode TransportMode) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.transport = t
+	p.transportMode = mode
+}
+
+// setProfile records the result of auto-negotiation.
+func (p *Proxy) setProfile(profile serverProfile) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.serverProfile = profile
 }
 
 // NewProxy creates a new MCP proxy
@@ -140,8 +180,8 @@ func (p *Proxy) Start() error {
 // Shutdown gracefully stops the proxy
 func (p *Proxy) Shutdown() {
 	log.Println("Shutting down proxy")
-	if p.transport != nil {
-		if err := p.transport.Close(); err != nil {
+	if t := p.currentTransport(); t != nil {
+		if err := t.Close(); err != nil {
 			log.Printf("Warning: failed to close transport: %v", err)
 		}
 	}
@@ -160,11 +200,12 @@ func (p *Proxy) getAuthToken() string {
 
 // connectToServer establishes a connection using the configured transport
 func (p *Proxy) connectToServer() error {
-	if p.transportMode == TransportModeAuto {
+	mode := p.currentTransportMode()
+	if mode == TransportModeAuto {
 		return p.negotiateTransport()
 	}
 
-	t := p.createTransport(p.transportMode)
+	t := p.createTransport(mode)
 	t.SetOnMessage(p.handleServerMessage)
 	t.SetOnError(p.handleServerError)
 
@@ -178,7 +219,7 @@ func (p *Proxy) connectToServer() error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	p.transport = t
+	p.setActiveTransport(t, mode)
 	log.Println("Connected to server successfully")
 	return nil
 }
@@ -205,7 +246,7 @@ func (p *Proxy) negotiateTransport() error {
 		return p.connectWithMode(TransportModeSSE)
 	}
 
-	p.serverProfile = profile
+	p.setProfile(profile)
 
 	if profile.era != eraUnknown {
 		log.Printf("Server implements the %s protocol era", profile.era)
@@ -298,8 +339,7 @@ func (p *Proxy) connectWithMode(mode TransportMode) error {
 		return fmt.Errorf("failed to connect with %s transport: %w", mode, err)
 	}
 
-	p.transport = t
-	p.transportMode = mode
+	p.setActiveTransport(t, mode)
 	log.Printf("Connected using %s transport", mode)
 	return nil
 }
@@ -315,7 +355,7 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 			GetAuthToken: p.getAuthToken,
 			// 2026-07-28 removed the GET notification stream. Knowing the era
 			// up front saves opening a request that can only be answered 405.
-			SkipNotificationStream: p.serverProfile.era == eraModern,
+			SkipNotificationStream: p.currentProfile().era == eraModern,
 		})
 	default: // SSE
 		return NewSSETransport(SSETransportConfig{
@@ -430,8 +470,8 @@ func (p *Proxy) processStdioInput() {
 					// Close the transport and cancel directly rather than
 					// calling Shutdown, which waits on the WaitGroup this
 					// goroutine has not yet released.
-					if p.transport != nil {
-						if closeErr := p.transport.Close(); closeErr != nil {
+					if t := p.currentTransport(); t != nil {
+						if closeErr := t.Close(); closeErr != nil {
 							log.Printf("Warning: failed to close transport: %v", closeErr)
 						}
 					}
@@ -458,11 +498,12 @@ func (p *Proxy) forwardToServer(line string) {
 		}
 	}
 
-	if p.transport == nil {
+	transport := p.currentTransport()
+	if transport == nil {
 		log.Printf("Error sending to server: not connected")
 		return
 	}
-	if err := p.transport.Send(p.ctx, []byte(line)); err != nil {
+	if err := transport.Send(p.ctx, []byte(line)); err != nil {
 		log.Printf("Error sending to server: %v", err)
 	}
 }
@@ -534,14 +575,14 @@ func (p *Proxy) SetStdio(reader *bufio.Reader, writer *bufio.Writer) {
 
 // SetCommandEndpoint sets the command endpoint URL (for backward compatibility in tests).
 func (p *Proxy) SetCommandEndpoint(endpoint string) {
-	if sseTransport, ok := p.transport.(*SSETransport); ok {
+	if sseTransport, ok := p.currentTransport().(*SSETransport); ok {
 		sseTransport.setCommandEndpoint(endpoint)
 	}
 }
 
 // GetCommandEndpoint returns the command endpoint URL (for backward compatibility in tests).
 func (p *Proxy) GetCommandEndpoint() string {
-	if sseTransport, ok := p.transport.(*SSETransport); ok {
+	if sseTransport, ok := p.currentTransport().(*SSETransport); ok {
 		return sseTransport.getCommandEndpointValue()
 	}
 	return ""

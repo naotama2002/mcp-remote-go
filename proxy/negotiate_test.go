@@ -48,8 +48,8 @@ func TestNegotiateTransportStreamableHTTP(t *testing.T) {
 	}
 
 	// Should have selected Streamable HTTP
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.currentTransportMode())
 	}
 }
 
@@ -91,13 +91,13 @@ func TestNegotiateDetectsModernServer(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("transport = %q, want streamable-http", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("transport = %q, want streamable-http", proxy.currentTransportMode())
 	}
-	if proxy.serverProfile.era != eraModern {
-		t.Errorf("era = %v, want modern", proxy.serverProfile.era)
+	if proxy.currentProfile().era != eraModern {
+		t.Errorf("era = %v, want modern", proxy.currentProfile().era)
 	}
-	if !proxy.serverProfile.supportsLegacy() {
+	if !proxy.currentProfile().supportsLegacy() {
 		t.Error("a server listing 2025-11-25 should be reported as dual-era")
 	}
 
@@ -148,11 +148,11 @@ func TestNegotiateDetectsLegacyServer(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("transport = %q, want streamable-http", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("transport = %q, want streamable-http", proxy.currentTransportMode())
 	}
-	if proxy.serverProfile.era != eraLegacy {
-		t.Errorf("era = %v, want legacy", proxy.serverProfile.era)
+	if proxy.currentProfile().era != eraLegacy {
+		t.Errorf("era = %v, want legacy", proxy.currentProfile().era)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestNegotiateDetectsModernOnlyServer(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.serverProfile.supportsLegacy() {
+	if proxy.currentProfile().supportsLegacy() {
 		t.Error("a server listing only 2026-07-28 must not be reported as answering initialize")
 	}
 }
@@ -230,8 +230,8 @@ func TestNegotiateTransportFallbackToSSE(t *testing.T) {
 	}
 
 	// Should have fallen back to SSE
-	if proxy.transportMode != TransportModeSSE {
-		t.Errorf("Expected transport mode 'sse', got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeSSE {
+		t.Errorf("Expected transport mode 'sse', got '%s'", proxy.currentTransportMode())
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -263,8 +263,8 @@ func TestNegotiateTransportFallbackOn405(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.transportMode != TransportModeSSE {
-		t.Errorf("Expected SSE fallback on 405, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeSSE {
+		t.Errorf("Expected SSE fallback on 405, got '%s'", proxy.currentTransportMode())
 	}
 }
 
@@ -290,8 +290,8 @@ func TestTransportModeSSEDirect(t *testing.T) {
 	}
 
 	// Should remain SSE
-	if proxy.transportMode != TransportModeSSE {
-		t.Errorf("Expected SSE mode, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeSSE {
+		t.Errorf("Expected SSE mode, got '%s'", proxy.currentTransportMode())
 	}
 }
 
@@ -329,8 +329,8 @@ func TestNegotiateTransportJSONRPCErrorBody(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("Expected transport mode 'streamable-http' for JSON-RPC error body, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("Expected transport mode 'streamable-http' for JSON-RPC error body, got '%s'", proxy.currentTransportMode())
 	}
 }
 
@@ -377,8 +377,8 @@ func TestNegotiateTransportProbeResponseNotForwarded(t *testing.T) {
 			stdoutBuf.Len(), stdoutBuf.String())
 	}
 
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.currentTransportMode())
 	}
 }
 
@@ -407,7 +407,7 @@ func TestTransportModeStreamableHTTPDirect(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Errorf("Expected streamable-http mode, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Errorf("Expected streamable-http mode, got '%s'", proxy.currentTransportMode())
 	}
 }

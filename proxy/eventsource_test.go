@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -192,9 +193,20 @@ func TestEventSourceMessageHandling(t *testing.T) {
 		t.Fatalf("Failed to create request: %v", err)
 	}
 
-	var receivedEvents []struct {
+	type receivedEvent struct {
 		event string
 		data  string
+	}
+
+	// The callback runs on the EventSource's reader goroutine, so the slice
+	// needs a lock to be read back here.
+	var eventsMu sync.Mutex
+	var events []receivedEvent
+
+	snapshot := func() []receivedEvent {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		return append([]receivedEvent(nil), events...)
 	}
 
 	client := &http.Client{}
@@ -203,13 +215,9 @@ func TestEventSourceMessageHandling(t *testing.T) {
 
 	// Set up callbacks
 	es.OnMessage = func(event string, data []byte) {
-		receivedEvents = append(receivedEvents, struct {
-			event string
-			data  string
-		}{
-			event: event,
-			data:  string(data),
-		})
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, receivedEvent{event: event, data: string(data)})
 	}
 
 	// Connect and wait for events
@@ -222,6 +230,7 @@ func TestEventSourceMessageHandling(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify received events
+	receivedEvents := snapshot()
 	if len(receivedEvents) < 3 {
 		t.Errorf("Expected at least 3 events, got %d", len(receivedEvents))
 	}
