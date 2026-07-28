@@ -17,7 +17,10 @@ import (
 var errNotificationStreamNotSupported = errors.New("server does not support GET notification stream")
 
 const (
-	// MCPProtocolVersion is the protocol version for Streamable HTTP transport.
+	// MCPProtocolVersion is the protocol version assumed until the local
+	// client's own traffic tells us otherwise. It is the last revision that
+	// used the initialize handshake, so it is the safe assumption for a client
+	// that has not declared a version yet.
 	MCPProtocolVersion = "2025-11-25"
 
 	// HeaderMCPSessionID is the session ID header name.
@@ -38,6 +41,11 @@ type StreamableHTTPTransport struct {
 	sessionID   string
 	lastEventID string
 
+	// protocolVersion is the revision declared on outgoing requests. The proxy
+	// never picks it: it is observed from the local client's own messages, so
+	// that a client on either era is forwarded faithfully.
+	protocolVersion string
+
 	onMessage func(event string, data []byte)
 	onError   func(err error)
 
@@ -56,10 +64,11 @@ type StreamableHTTPTransportConfig struct {
 // NewStreamableHTTPTransport creates a new Streamable HTTP transport.
 func NewStreamableHTTPTransport(cfg StreamableHTTPTransportConfig) *StreamableHTTPTransport {
 	return &StreamableHTTPTransport{
-		endpoint:     cfg.Endpoint,
-		client:       cfg.Client,
-		headers:      cfg.Headers,
-		getAuthToken: cfg.GetAuthToken,
+		endpoint:        cfg.Endpoint,
+		client:          cfg.Client,
+		headers:         cfg.Headers,
+		getAuthToken:    cfg.GetAuthToken,
+		protocolVersion: MCPProtocolVersion,
 	}
 }
 
@@ -71,12 +80,15 @@ func (t *StreamableHTTPTransport) Connect(ctx context.Context) error {
 }
 
 func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) error {
+	md := parseRequestMetadata(message)
+	t.observeProtocolVersion(md)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint, bytes.NewReader(message))
 	if err != nil {
 		return fmt.Errorf("failed to create POST request: %w", err)
 	}
 
-	t.setCommonHeaders(req)
+	t.setCommonHeaders(req, md)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 
@@ -162,7 +174,8 @@ func (t *StreamableHTTPTransport) Close() error {
 		t.notifyCancel()
 	}
 
-	// Send DELETE to terminate the session
+	// Send DELETE to terminate the session. Only legacy servers mint session
+	// IDs, so this is naturally skipped on 2026-07-28 and later.
 	t.mu.Lock()
 	sid := t.sessionID
 	t.mu.Unlock()
@@ -172,7 +185,7 @@ func (t *StreamableHTTPTransport) Close() error {
 		if err != nil {
 			return fmt.Errorf("failed to create DELETE request: %w", err)
 		}
-		t.setCommonHeaders(req)
+		t.setCommonHeaders(req, requestMetadata{})
 
 		resp, err := t.client.Do(req)
 		if err != nil {
@@ -193,8 +206,26 @@ func (t *StreamableHTTPTransport) SessionID() string {
 	return t.sessionID
 }
 
-// setCommonHeaders sets headers common to all requests.
-func (t *StreamableHTTPTransport) setCommonHeaders(req *http.Request) {
+// observeProtocolVersion records the revision the local client is speaking.
+// A modern client declares it in `_meta` on every request; a legacy client
+// declares it once, in the `initialize` handshake.
+func (t *StreamableHTTPTransport) observeProtocolVersion(md requestMetadata) {
+	version := md.protocolVersion
+	if version == "" && md.method == "initialize" {
+		version = md.initializeVersion
+	}
+	if version == "" {
+		return
+	}
+
+	t.mu.Lock()
+	t.protocolVersion = version
+	t.mu.Unlock()
+}
+
+// setCommonHeaders sets headers common to all requests. Pass the zero
+// requestMetadata for requests that carry no JSON-RPC body (GET, DELETE).
+func (t *StreamableHTTPTransport) setCommonHeaders(req *http.Request, md requestMetadata) {
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
 	}
@@ -205,13 +236,33 @@ func (t *StreamableHTTPTransport) setCommonHeaders(req *http.Request) {
 		}
 	}
 
-	req.Header.Set(HeaderMCPProtocolVersion, MCPProtocolVersion)
-
 	t.mu.Lock()
-	if t.sessionID != "" {
-		req.Header.Set(HeaderMCPSessionID, t.sessionID)
-	}
+	version := t.protocolVersion
+	sessionID := t.sessionID
 	t.mu.Unlock()
+
+	// The header must match the version in the body, so a message that carries
+	// its own declaration always wins over the transport's running value.
+	if md.protocolVersion != "" {
+		version = md.protocolVersion
+	}
+	req.Header.Set(HeaderMCPProtocolVersion, version)
+
+	if version >= ProtocolVersion20260728 {
+		// Sessions were removed in 2026-07-28; a modern server ignores the
+		// header, but sending it would misrepresent us to intermediaries.
+		if md.method != "" {
+			req.Header.Set(HeaderMCPMethod, md.method)
+			if md.hasName {
+				req.Header.Set(HeaderMCPName, encodeHeaderValue(md.name))
+			}
+		}
+		return
+	}
+
+	if sessionID != "" {
+		req.Header.Set(HeaderMCPSessionID, sessionID)
+	}
 }
 
 // startNotificationStream opens a GET SSE stream for server-initiated notifications.
@@ -258,7 +309,7 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 		return fmt.Errorf("failed to create GET request: %w", err)
 	}
 
-	t.setCommonHeaders(req)
+	t.setCommonHeaders(req, requestMetadata{})
 	req.Header.Set("Accept", "text/event-stream")
 
 	t.mu.Lock()

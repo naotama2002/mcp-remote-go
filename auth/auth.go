@@ -50,6 +50,17 @@ type ServerMetadata struct {
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
 	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
+	// AuthorizationResponseIssParameterSupported reports whether the server
+	// returns the `iss` parameter on authorization responses (RFC 9207 §3).
+	// When true, a response without `iss` is rejected.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported,omitempty"`
+}
+
+// callbackResult carries the outcome of the OAuth callback to the goroutine
+// waiting in WaitForAuthCode.
+type callbackResult struct {
+	code string
+	err  error
 }
 
 // Coordinator handles the OAuth flow
@@ -61,8 +72,9 @@ type Coordinator struct {
 	serverMetadata *ServerMetadata
 	resource       string // RFC 8707 canonical resource URI, reused across the flow
 	codeVerifier   string
+	state          string // CSRF binding between the authorization request and its callback
 	authMutex      sync.Mutex
-	callbackChan   chan string
+	callbackChan   chan callbackResult
 }
 
 // NewCoordinator creates a new authentication coordinator
@@ -78,7 +90,7 @@ func NewCoordinator(serverURLHash string, callbackPort int) (*Coordinator, error
 	return &Coordinator{
 		serverURLHash: serverURLHash,
 		callbackPort:  callbackPort,
-		callbackChan:  make(chan string),
+		callbackChan:  make(chan callbackResult),
 	}, nil
 }
 
@@ -146,8 +158,11 @@ func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (stri
 func (c *Coordinator) WaitForAuthCode() (string, error) {
 	// Wait for the code from the callback
 	select {
-	case code := <-c.callbackChan:
-		return code, nil
+	case result := <-c.callbackChan:
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.code, nil
 	case <-time.After(5 * time.Minute):
 		return "", errors.New("timeout waiting for authorization code")
 	}
@@ -305,6 +320,11 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 		"token_endpoint_auth_method": "none",
 		"scope":                      "mcp offline_access",
 		"grant_types":                []string{"authorization_code"},
+		// A locally-installed CLI redirecting to loopback is a native client;
+		// declaring it lets the authorization server apply the right redirect
+		// URI rules instead of guessing (OpenID Connect Registration §2,
+		// required by the MCP authorization spec since 2026-07-28).
+		"application_type": "native",
 	}
 
 	// Send registration request using httpclient
@@ -355,15 +375,28 @@ func (c *Coordinator) startCallbackServer() error {
 
 	// Callback handler
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Error(w, "Authorization code not found", http.StatusBadRequest)
+		query := r.URL.Query()
+
+		c.authMutex.Lock()
+		expectedState := c.state
+		metadata := c.serverMetadata
+		c.authMutex.Unlock()
+
+		if err := validateAuthorizationResponse(query, expectedState, metadata); err != nil {
+			// Report the failure to the waiting flow rather than letting it
+			// sit until the five-minute timeout.
+			select {
+			case c.callbackChan <- callbackResult{err: err}:
+			default:
+			}
+			log.Printf("Rejected OAuth callback: %v", err)
+			http.Error(w, "Authorization failed: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		// Send the code to the waiting goroutine
 		select {
-		case c.callbackChan <- code:
+		case c.callbackChan <- callbackResult{code: query.Get("code")}:
 			// Send success response
 			w.Header().Set("Content-Type", "text/html")
 			if _, err := w.Write([]byte(`
@@ -430,12 +463,21 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	}
 	c.codeVerifier = verifier
 
+	// Generate the CSRF state bound to this authorization request. Callers
+	// hold authMutex, so this is safe to assign directly.
+	state, err := GenerateState()
+	if err != nil {
+		return "", err
+	}
+	c.state = state
+
 	// Build params
 	params := url.Values{}
 	params.Set("client_id", c.clientInfo.ClientID)
 	params.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", c.callbackPort))
 	params.Set("response_type", "code")
 	params.Set("scope", "mcp offline_access")
+	params.Set("state", state)
 	params.Set("code_challenge", ComputeCodeChallenge(verifier))
 	params.Set("code_challenge_method", "S256")
 

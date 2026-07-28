@@ -13,11 +13,24 @@ MCP Remote proxies between:
 - **Streamable HTTP transport** (MCP 2025-11-25) - Single-endpoint POST/GET with session management
 - **Legacy SSE transport** (MCP 2024-11-05) - Traditional two-endpoint SSE connection
 - **Auto-negotiation** - Automatically detects server capabilities and selects the optimal transport
+- **Request metadata headers** (MCP 2026-07-28) - `Mcp-Method` and `Mcp-Name` are derived from each message, with the base64 sentinel encoding for values that are not header-safe
 - **OAuth 2.1 with PKCE** (RFC 7636) - Secure authorization with S256 code challenge
+- **CSRF-protected callback** - `state` binds each authorization request to its callback, and the issuer is validated per RFC 9207 to prevent mix-up attacks
 - **Protected Resource Metadata** (RFC 9728) - Discover authorization servers from resource endpoints, including `WWW-Authenticate`-driven discovery on 401 responses (§5.1)
 - **Resource Indicators** (RFC 8707) - The MCP server's canonical URI is sent as `resource` on both authorization and token requests
 - **OAuth Discovery** (RFC 8414) and OpenID Connect Discovery
 - **Custom headers** and HTTPS enforcement
+
+### Protocol revision support
+
+The proxy forwards whichever revision the local MCP client speaks; it never
+picks one on the client's behalf. A client on 2025-11-25 or earlier is
+forwarded through the `initialize` handshake as before, and a client on
+2026-07-28 has its per-request `_meta` mirrored into the routing headers that
+revision requires.
+
+Bridging a client and a server on *different* revisions is not yet supported —
+see `test/conformance` for what is verified today.
 
 ## Installation
 

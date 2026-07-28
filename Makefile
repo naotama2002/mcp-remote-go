@@ -18,7 +18,11 @@ LDFLAGS=-ldflags "-X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X 
 MCPB_DIR=${BUILD_DIR}/mcpb
 MCPB_PLATFORMS=darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: all build clean test test-unit test-integration check fmt lint vet mcpb help
+# Conformance tests live in their own module so the MCP SDK stays out of the
+# main module's dependency tree.
+CONFORMANCE_DIR=./test/conformance
+
+.PHONY: all build clean test test-unit test-integration test-conformance check fmt lint vet mcpb help
 
 # Default target
 all: clean check build
@@ -33,6 +37,7 @@ help:
 	@echo "  test-unit      - Run unit tests only (may include some integration tests)"
 	@echo "  test-unit-safe - Run only safe unit tests (excludes all integration tests)"
 	@echo "  test-integration - Run all tests including browser and integration tests"
+	@echo "  test-conformance - Run spec conformance tests against the official MCP SDK"
 	@echo "  check          - Run all code checks (fmt, vet, lint)"
 	@echo "  fmt            - Format code"
 	@echo "  vet            - Run go vet"
@@ -63,6 +68,13 @@ test-unit:
 test-integration:
 	@echo "Running integration tests (may open browsers)..."
 	go test -v ./...
+
+# Run conformance tests against a server built from the official MCP Go SDK.
+# The SDK is an independent implementation of the spec, so these catch places
+# where our reading of it is wrong -- something our own unit tests cannot do.
+test-conformance:
+	@echo "Running spec conformance tests against the official MCP SDK..."
+	cd ${CONFORMANCE_DIR} && go test -v ./...
 
 # Run tests (defaults to unit tests for CI safety)
 test: test-unit-safe

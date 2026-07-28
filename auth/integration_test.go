@@ -441,8 +441,8 @@ func TestCallbackServerLifecycle(t *testing.T) {
 	// Simulate an auth flow by creating a goroutine that will read from the callback channel
 	go func() {
 		select {
-		case code := <-coordinator.callbackChan:
-			t.Logf("Received auth code: %s", code)
+		case result := <-coordinator.callbackChan:
+			t.Logf("Received callback result: code=%q err=%v", result.code, result.err)
 		case <-time.After(500 * time.Millisecond):
 			// Timeout is expected for this test
 		}

@@ -1,0 +1,148 @@
+package proxy
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
+)
+
+// Request metadata mirroring for the Streamable HTTP transport.
+//
+// Since MCP 2026-07-28 the transport mirrors selected JSON-RPC body fields
+// into HTTP headers so intermediaries can route without parsing the body.
+// Servers MUST reject a request whose headers disagree with its body, so the
+// values here are always derived from the message actually being sent rather
+// than from transport-level state.
+//
+// https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
+const (
+	// HeaderMCPMethod mirrors the JSON-RPC `method` field. Required on all
+	// requests from 2026-07-28 onwards.
+	HeaderMCPMethod = "Mcp-Method"
+
+	// HeaderMCPName mirrors `params.name` or `params.uri`. Required for
+	// tools/call, prompts/get and resources/read.
+	HeaderMCPName = "Mcp-Name"
+
+	// MetaKeyProtocolVersion is the _meta key carrying the protocol version on
+	// every request in the modern (per-request metadata) era.
+	MetaKeyProtocolVersion = "io.modelcontextprotocol/protocolVersion"
+
+	// ProtocolVersion20260728 is the first revision that drops the initialize
+	// handshake and requires the standard request metadata headers.
+	ProtocolVersion20260728 = "2026-07-28"
+
+	// base64Prefix and base64Suffix delimit the sentinel encoding used for
+	// header values that cannot be represented as plain ASCII.
+	base64Prefix = "=?base64?"
+	base64Suffix = "?="
+)
+
+// requestMetadata is the subset of an outgoing JSON-RPC message that the
+// Streamable HTTP transport mirrors into HTTP headers.
+type requestMetadata struct {
+	// method is the JSON-RPC method, empty for responses.
+	method string
+
+	// name is the value for Mcp-Name, set only for the methods that require it.
+	name    string
+	hasName bool
+
+	// protocolVersion is the version declared in `params._meta`. Non-empty
+	// only for modern-era messages.
+	protocolVersion string
+
+	// initializeVersion is `params.protocolVersion` on a legacy `initialize`
+	// request, i.e. the version the local client is asking the server for.
+	initializeVersion string
+}
+
+// isModern reports whether the message declares a revision that requires the
+// standard request metadata headers.
+func (m requestMetadata) isModern() bool {
+	return m.protocolVersion >= ProtocolVersion20260728
+}
+
+// parseRequestMetadata extracts the header-relevant fields from a JSON-RPC
+// message. A message that cannot be parsed yields a zero value, which mirrors
+// nothing and leaves the request untouched: forwarding it unchanged keeps the
+// proxy transparent and lets the server produce the error.
+func parseRequestMetadata(message []byte) requestMetadata {
+	var envelope struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(message, &envelope); err != nil {
+		return requestMetadata{}
+	}
+
+	md := requestMetadata{method: envelope.Method}
+	if len(envelope.Params) == 0 {
+		return md
+	}
+
+	var params struct {
+		Name            string          `json:"name"`
+		URI             string          `json:"uri"`
+		ProtocolVersion string          `json:"protocolVersion"`
+		Meta            json.RawMessage `json:"_meta"`
+	}
+	if err := json.Unmarshal(envelope.Params, &params); err != nil {
+		// params is present but not an object; nothing to mirror.
+		return md
+	}
+
+	md.initializeVersion = params.ProtocolVersion
+
+	// The spec fixes the source field per method rather than falling back
+	// between them, so an unexpected `name` on resources/read is not mirrored.
+	switch envelope.Method {
+	case "tools/call", "prompts/get":
+		md.name, md.hasName = params.Name, params.Name != ""
+	case "resources/read":
+		md.name, md.hasName = params.URI, params.URI != ""
+	}
+
+	if len(params.Meta) > 0 {
+		var meta map[string]json.RawMessage
+		if json.Unmarshal(params.Meta, &meta) == nil {
+			if raw, ok := meta[MetaKeyProtocolVersion]; ok {
+				var version string
+				if json.Unmarshal(raw, &version) == nil {
+					md.protocolVersion = version
+				}
+			}
+		}
+	}
+
+	return md
+}
+
+// encodeHeaderValue renders a value for Mcp-Name using the base64 sentinel
+// format when it cannot be carried as a plain ASCII header value.
+func encodeHeaderValue(value string) string {
+	if requiresBase64Encoding(value) {
+		return base64Prefix + base64.StdEncoding.EncodeToString([]byte(value)) + base64Suffix
+	}
+	return value
+}
+
+// requiresBase64Encoding reports whether a value must use the sentinel
+// encoding: RFC 9110 restricts field values to visible ASCII plus space and
+// horizontal tab, and neither may sit at the edges of the value.
+func requiresBase64Encoding(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s[0] == ' ' || s[0] == '\t' || s[len(s)-1] == ' ' || s[len(s)-1] == '\t' {
+		return true
+	}
+	for _, c := range s {
+		if c < 0x20 || c > 0x7E {
+			return true
+		}
+	}
+	// A plain-ASCII value that looks like the sentinel is encoded too, so a
+	// server can never mistake it for an already-encoded value.
+	return strings.HasPrefix(s, base64Prefix) && strings.HasSuffix(s, base64Suffix)
+}
