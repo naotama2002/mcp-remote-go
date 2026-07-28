@@ -49,6 +49,10 @@ type StreamableHTTPTransport struct {
 	onMessage func(event string, data []byte)
 	onError   func(err error)
 
+	// skipNotificationStream suppresses the GET stream for servers already
+	// known to have dropped it.
+	skipNotificationStream bool
+
 	notifyCancel context.CancelFunc
 	mu           sync.Mutex
 }
@@ -59,22 +63,32 @@ type StreamableHTTPTransportConfig struct {
 	Client       *http.Client
 	Headers      map[string]string
 	GetAuthToken func() string
+
+	// SkipNotificationStream suppresses the GET notification stream, which
+	// 2026-07-28 removed. Leave it false when the era is unknown: the
+	// transport handles the 405 and stops on its own.
+	SkipNotificationStream bool
 }
 
 // NewStreamableHTTPTransport creates a new Streamable HTTP transport.
 func NewStreamableHTTPTransport(cfg StreamableHTTPTransportConfig) *StreamableHTTPTransport {
 	return &StreamableHTTPTransport{
-		endpoint:        cfg.Endpoint,
-		client:          cfg.Client,
-		headers:         cfg.Headers,
-		getAuthToken:    cfg.GetAuthToken,
-		protocolVersion: MCPProtocolVersion,
+		endpoint:               cfg.Endpoint,
+		client:                 cfg.Client,
+		headers:                cfg.Headers,
+		getAuthToken:           cfg.GetAuthToken,
+		skipNotificationStream: cfg.SkipNotificationStream,
+		protocolVersion:        MCPProtocolVersion,
 	}
 }
 
 func (t *StreamableHTTPTransport) Connect(ctx context.Context) error {
 	// Streamable HTTP does not require a persistent connection on Connect.
 	// Optionally open a GET request for server-initiated notifications.
+	if t.skipNotificationStream {
+		log.Println("Skipping GET notification stream: the server's protocol revision does not have one")
+		return nil
+	}
 	t.startNotificationStream(ctx)
 	return nil
 }

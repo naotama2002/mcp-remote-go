@@ -2,6 +2,8 @@ package conformance
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -206,6 +208,43 @@ func TestModernServerDropsSessionMechanics(t *testing.T) {
 	// spin. Reaching this point at all means it did not block startup.
 	if got := rec.lastPOST(t).Get("Last-Event-ID"); got != "" {
 		t.Errorf("Last-Event-ID = %q, want it absent: streams are not resumable", got)
+	}
+}
+
+// TestDiscoverProbeContract checks the assumption era detection rests on:
+// that a real modern server answers server/discover with the list of versions
+// it speaks. Our classification of that answer is unit-tested in the proxy
+// package; what cannot be verified there is whether a genuine server replies
+// in this shape at all, which is what this pins.
+func TestDiscoverProbeContract(t *testing.T) {
+	endpoint := newSDKServer(t)
+
+	resp := rawPOST(t, endpoint,
+		`{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{`+modernMeta+`}}`,
+		map[string]string{
+			"Mcp-Protocol-Version": "2026-07-28",
+			"Mcp-Method":           "server/discover",
+		})
+
+	if resp.Error != nil {
+		t.Fatalf("server/discover failed: %+v", resp.Error)
+	}
+
+	var result struct {
+		SupportedVersions []string `json:"supportedVersions"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("failed to parse DiscoverResult: %v", err)
+	}
+
+	if !slices.Contains(result.SupportedVersions, "2026-07-28") {
+		t.Errorf("supportedVersions = %v, want it to include 2026-07-28", result.SupportedVersions)
+	}
+
+	// The SDK serves both eras, which is what makes the "does this server
+	// still answer initialize" question answerable from the version list.
+	if !slices.Contains(result.SupportedVersions, "2025-11-25") {
+		t.Errorf("supportedVersions = %v, want a dual-era server to list 2025-11-25", result.SupportedVersions)
 	}
 }
 

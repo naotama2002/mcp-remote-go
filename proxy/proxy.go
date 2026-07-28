@@ -35,6 +35,10 @@ type Proxy struct {
 	headers       map[string]string
 	serverURLHash string
 	transportMode TransportMode
+	// serverProfile holds what auto-negotiation learned about the remote. The
+	// spec asks clients to cache the era for the lifetime of the origin; this
+	// process is scoped to exactly one origin, so the field is that cache.
+	serverProfile serverProfile
 	authCoord     *auth.Coordinator
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -179,16 +183,52 @@ func (p *Proxy) connectToServer() error {
 	return nil
 }
 
-// negotiateTransport attempts Streamable HTTP first, then falls back to SSE.
+// negotiateTransport probes the server to settle two questions at once: which
+// transport shape it speaks, and which protocol era it implements.
+//
+// The probe is a modern server/discover request. A modern server answers it
+// with the list of versions it supports; a legacy one rejects it but still
+// replies in JSON-RPC over the same endpoint, which is enough to place it. A
+// server that does not answer POST at all is left to the deprecated HTTP+SSE
+// transport.
 func (p *Proxy) negotiateTransport() error {
 	log.Println("Auto-detecting transport...")
 
-	// Try Streamable HTTP first: send a POST probe to the server URL
-	probeReq, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":0}`))
+	profile, err := p.probeServer()
 	if err != nil {
-		// If we can't even create the request, fall back to SSE
-		log.Printf("Failed to create probe request: %v, falling back to SSE", err)
+		var unauth *UnauthorizedError
+		if errors.As(err, &unauth) {
+			log.Println("Authentication required")
+			return p.handleAuthentication(unauth.WWWAuthenticate)
+		}
+		log.Printf("Probe failed: %v, falling back to SSE", err)
 		return p.connectWithMode(TransportModeSSE)
+	}
+
+	p.serverProfile = profile
+
+	if profile.era != eraUnknown {
+		log.Printf("Server implements the %s protocol era", profile.era)
+	}
+	if len(profile.supportedVersions) > 0 {
+		log.Printf("Server supports protocol versions: %s", strings.Join(profile.supportedVersions, ", "))
+	}
+	if !profile.supportsLegacy() {
+		// The compatibility matrix has no path from a legacy client to a
+		// modern-only server, so say so now rather than let the user debug a
+		// -32020 on their first tool call.
+		log.Println("Warning: this server no longer answers the initialize handshake. " +
+			"An MCP client older than 2026-07-28 cannot connect through this proxy.")
+	}
+
+	return p.connectWithMode(profile.transport)
+}
+
+// probeServer sends the era probe and classifies the reply.
+func (p *Proxy) probeServer() (serverProfile, error) {
+	probeReq, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(probeBody()))
+	if err != nil {
+		return serverProfile{}, fmt.Errorf("failed to create probe request: %w", err)
 	}
 
 	for k, v := range p.headers {
@@ -199,47 +239,46 @@ func (p *Proxy) negotiateTransport() error {
 	}
 	probeReq.Header.Set("Content-Type", "application/json")
 	probeReq.Header.Set("Accept", "application/json, text/event-stream")
-	probeReq.Header.Set(HeaderMCPProtocolVersion, MCPProtocolVersion)
+	probeReq.Header.Set(HeaderMCPProtocolVersion, ProtocolVersion20260728)
+	probeReq.Header.Set(HeaderMCPMethod, "server/discover")
 
 	resp, err := p.client.Do(probeReq)
 	if err != nil {
-		log.Printf("Streamable HTTP probe failed: %v, falling back to SSE", err)
-		return p.connectWithMode(TransportModeSSE)
+		return serverProfile{}, fmt.Errorf("streamable HTTP probe failed: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return serverProfile{}, unauthorizedFromResponse(resp)
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	wwwAuth := auth.BestWWWAuthenticateHeader(resp.Header.Values(HeaderWWWAuthenticate))
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	// Check if response body looks like JSON-RPC (indicates Streamable HTTP support)
-	isJSONRPC := len(body) > 0 && json.Valid(body) && isJSONRPCResponse(body)
+	era, supported, isJSONRPC := classifyProbe(resp.StatusCode, body)
 
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
-		// Server supports Streamable HTTP
 		log.Println("Server supports Streamable HTTP transport")
-		return p.connectWithMode(TransportModeStreamableHTTP)
-
-	case resp.StatusCode == http.StatusUnauthorized:
-		log.Println("Authentication required")
-		return p.handleAuthentication(wwwAuth)
-
-	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
-		// Server does not support Streamable HTTP, fall back to SSE
-		log.Printf("Server returned %d, falling back to SSE transport", resp.StatusCode)
-		return p.connectWithMode(TransportModeSSE)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: era, supportedVersions: supported}, nil
 
 	case isJSONRPC:
-		// Server returned an error status but with a JSON-RPC body,
-		// which means it understands the protocol (Streamable HTTP)
-		log.Printf("Server returned %d with JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
-		return p.connectWithMode(TransportModeStreamableHTTP)
+		// A JSON-RPC body means the server speaks the protocol on this
+		// endpoint even though it rejected this particular request, so the
+		// endpoint is a Streamable HTTP one regardless of the status.
+		log.Printf("Server returned %d with a JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: era, supportedVersions: supported}, nil
+
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
+		// No MCP endpoint here, and no JSON-RPC error to say otherwise: this
+		// is the signature of a server hosting only the deprecated transport.
+		log.Printf("Server returned %d without a JSON-RPC body, falling back to SSE transport", resp.StatusCode)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
 
 	default:
 		log.Printf("Unexpected status %d from probe, falling back to SSE", resp.StatusCode)
-		return p.connectWithMode(TransportModeSSE)
+		return serverProfile{transport: TransportModeSSE, era: eraUnknown}, nil
 	}
 }
 
@@ -274,6 +313,9 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 			Client:       p.client,
 			Headers:      p.headers,
 			GetAuthToken: p.getAuthToken,
+			// 2026-07-28 removed the GET notification stream. Knowing the era
+			// up front saves opening a request that can only be answered 405.
+			SkipNotificationStream: p.serverProfile.era == eraModern,
 		})
 	default: // SSE
 		return NewSSETransport(SSETransportConfig{
@@ -482,16 +524,6 @@ func (p *Proxy) handleServerError(err error) {
 		log.Printf("Reconnection failed: %v", err)
 		p.Shutdown()
 	}
-}
-
-// isJSONRPCResponse checks if the body looks like a JSON-RPC response.
-func isJSONRPCResponse(body []byte) bool {
-	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	_, hasJSONRPC := obj["jsonrpc"]
-	return hasJSONRPC
 }
 
 // SetStdio replaces the stdio reader and writer (for testing).

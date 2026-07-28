@@ -142,6 +142,14 @@ docker run --rm -it -p 3334:3334 -v ~/.mcp-remote-go-auth:/home/appuser/.mcp-rem
 
 By default, `mcp-remote-go` auto-detects the transport (Streamable HTTP or SSE). You can force a specific transport with the `--transport` flag.
 
+Detection sends a `server/discover` request and reads the reply. A server that
+answers it is on 2026-07-28 or later, and the answer also names every revision
+it supports; a server that rejects it in JSON-RPC is on an earlier revision but
+still speaks Streamable HTTP; a server that does not answer POST at all is
+served over the deprecated SSE transport. If the server turns out to have
+dropped the `initialize` handshake entirely, the proxy logs a warning at
+startup, because an MCP client older than 2026-07-28 has no way to reach it.
+
 ### Claude Desktop (MCPB Extension)
 
 The easiest way to use with Claude Desktop is via the `.mcpb` extension. After installing, configure through the GUI:

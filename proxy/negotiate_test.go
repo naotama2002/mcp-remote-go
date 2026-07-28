@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,6 +50,142 @@ func TestNegotiateTransportStreamableHTTP(t *testing.T) {
 	// Should have selected Streamable HTTP
 	if proxy.transportMode != TransportModeStreamableHTTP {
 		t.Errorf("Expected transport mode 'streamable-http', got '%s'", proxy.transportMode)
+	}
+}
+
+// TestNegotiateDetectsModernServer checks the probe places a server that
+// answers server/discover, and that the era is acted on rather than merely
+// recorded: 2026-07-28 has no GET notification stream, so a correctly
+// classified server is never asked for one.
+func TestNegotiateDetectsModernServer(t *testing.T) {
+	var mu sync.Mutex
+	var gets int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      0,
+				"result": map[string]interface{}{
+					"supportedVersions": []string{"2026-07-28", "2025-11-25"},
+				},
+			})
+		case http.MethodGet:
+			mu.Lock()
+			gets++
+			mu.Unlock()
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "modern-era-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	if err := proxy.connectToServer(); err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if proxy.transportMode != TransportModeStreamableHTTP {
+		t.Errorf("transport = %q, want streamable-http", proxy.transportMode)
+	}
+	if proxy.serverProfile.era != eraModern {
+		t.Errorf("era = %v, want modern", proxy.serverProfile.era)
+	}
+	if !proxy.serverProfile.supportsLegacy() {
+		t.Error("a server listing 2025-11-25 should be reported as dual-era")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gets != 0 {
+		t.Errorf("opened %d GET notification streams against a modern server, want 0", gets)
+	}
+}
+
+// TestNegotiateDetectsLegacyServer covers the other branch: a server that
+// rejects server/discover but answers in JSON-RPC is legacy, and still gets
+// its notification stream.
+func TestNegotiateDetectsLegacyServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      0,
+				"error": map[string]interface{}{
+					"code":    -32601,
+					"message": "Method not found",
+				},
+			})
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			flusher.Flush()
+			<-r.Context().Done()
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "legacy-era-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	if err := proxy.connectToServer(); err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if proxy.transportMode != TransportModeStreamableHTTP {
+		t.Errorf("transport = %q, want streamable-http", proxy.transportMode)
+	}
+	if proxy.serverProfile.era != eraLegacy {
+		t.Errorf("era = %v, want legacy", proxy.serverProfile.era)
+	}
+}
+
+// TestNegotiateDetectsModernOnlyServer covers the case the compatibility
+// matrix marks as unreachable for a legacy client, which the proxy must be
+// able to recognise in order to say so.
+func TestNegotiateDetectsModernOnlyServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      0,
+			"result":  map[string]interface{}{"supportedVersions": []string{"2026-07-28"}},
+		})
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "modern-only-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	if err := proxy.connectToServer(); err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if proxy.serverProfile.supportsLegacy() {
+		t.Error("a server listing only 2026-07-28 must not be reported as answering initialize")
 	}
 }
 
