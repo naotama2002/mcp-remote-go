@@ -38,6 +38,12 @@ const (
 	base64Prefix = "=?base64?"
 	base64Suffix = "?="
 
+	// methodToolsList and methodToolsCall are the two methods whose traffic the
+	// transport has to look inside: one advertises the header bindings, the
+	// other needs them applied.
+	methodToolsList = "tools/list"
+	methodToolsCall = "tools/call"
+
 	// methodCancelled is the notification a client sends to abandon a request.
 	// From 2026-07-28 it is a stdio-only message: on Streamable HTTP the
 	// cancellation signal is closing the request's response stream.
@@ -69,6 +75,10 @@ type requestMetadata struct {
 	// cancelTarget is the id named by `params.requestId` on a
 	// notifications/cancelled message, in the same canonical form.
 	cancelTarget string
+
+	// params is the raw params object, kept so x-mcp-header mirroring can read
+	// the call arguments without parsing the message a second time.
+	params json.RawMessage
 }
 
 // requestKey renders a JSON-RPC id as a comparable key. JSON-RPC ids may be
@@ -112,7 +122,7 @@ func parseRequestMetadata(message []byte) requestMetadata {
 		return requestMetadata{}
 	}
 
-	md := requestMetadata{method: envelope.Method, id: requestKey(envelope.ID)}
+	md := requestMetadata{method: envelope.Method, id: requestKey(envelope.ID), params: envelope.Params}
 	if len(envelope.Params) == 0 {
 		return md
 	}

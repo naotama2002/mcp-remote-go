@@ -35,6 +35,53 @@ func newSDKServer(t *testing.T, toolNames ...string) string {
 	return endpoint
 }
 
+// sqlIn matches the annotated schema used by newAnnotatedSDKServer.
+type sqlIn struct {
+	Region string `json:"region"`
+	Query  string `json:"query"`
+}
+
+// newAnnotatedSDKServer serves a tool whose schema asks for one of its
+// arguments to be mirrored into a header, which is the case x-mcp-header
+// exists for. The SDK validates the header against the body on arrival, so a
+// call only succeeds if the value was extracted and encoded correctly.
+func newAnnotatedSDKServer(t *testing.T) (string, *recorder) {
+	t.Helper()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "conformance", Version: "0.1.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "execute_sql",
+		Description: "Execute SQL in a region",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"region": map[string]any{
+					"type":         "string",
+					"description":  "The region to execute the query in",
+					"x-mcp-header": "Region",
+				},
+				"query": map[string]any{
+					"type":        "string",
+					"description": "The SQL query to execute",
+				},
+			},
+			"required": []any{"region", "query"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in sqlIn) (*mcp.CallToolResult, echoOut, error) {
+		return nil, echoOut{Text: in.Region + ":" + in.Query}, nil
+	})
+
+	handler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{Stateless: true},
+	)
+
+	rec := &recorder{}
+	ts := httptest.NewServer(rec.wrap(handler))
+	t.Cleanup(ts.Close)
+	return ts.URL, rec
+}
+
 // recorder captures the HTTP headers of every request that reaches the server,
 // so tests can assert on what the transport actually put on the wire.
 type recorder struct {

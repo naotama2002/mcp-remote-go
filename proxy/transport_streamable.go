@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -53,6 +54,13 @@ type StreamableHTTPTransport struct {
 	// known to have dropped it.
 	skipNotificationStream bool
 
+	// toolHeaders remembers the x-mcp-header bindings advertised in tools/list
+	// so a later tools/call can be decorated with them, and pendingToolsList
+	// records which in-flight ids will bring such a list back. Responses carry
+	// only an id, so the method has to be remembered from the request.
+	toolHeaders      *toolHeaderRegistry
+	pendingToolsList map[string]struct{}
+
 	// inflight maps a request id to the cancel func of its response stream.
 	// Each request on this transport has its own stream, and closing that
 	// stream is how the request is cancelled, so cancellation needs the
@@ -85,6 +93,8 @@ func NewStreamableHTTPTransport(cfg StreamableHTTPTransportConfig) *StreamableHT
 		getAuthToken:           cfg.GetAuthToken,
 		skipNotificationStream: cfg.SkipNotificationStream,
 		protocolVersion:        MCPProtocolVersion,
+		toolHeaders:            newToolHeaderRegistry(),
+		pendingToolsList:       make(map[string]struct{}),
 		inflight:               make(map[string]context.CancelFunc),
 	}
 }
@@ -106,6 +116,12 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 
 	if handled := t.handleCancellation(md); handled {
 		return nil
+	}
+
+	// The reply to a tools/list carries the schemas the header mirroring needs,
+	// but a reply names only its id, so the association is made here.
+	if md.method == methodToolsList && md.isModern() {
+		t.expectToolsList(md.id)
 	}
 
 	// Give each request its own context so its response stream can be closed
@@ -183,8 +199,8 @@ func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) erro
 			return fmt.Errorf("failed to read response body: %w", err)
 		}
 
-		if t.onMessage != nil && len(body) > 0 {
-			t.onMessage("message", body)
+		if len(body) > 0 {
+			t.deliver("message", body)
 		}
 		return nil
 
@@ -258,6 +274,59 @@ func (t *StreamableHTTPTransport) SessionID() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.sessionID
+}
+
+// deliver forwards a message from the server, after taking from it anything
+// the transport itself needs. A tools/list result is where x-mcp-header
+// bindings are learned, and where tools carrying invalid ones are dropped
+// before the client can call them.
+func (t *StreamableHTTPTransport) deliver(event string, data []byte) {
+	if t.onMessage == nil {
+		return
+	}
+
+	if t.claimToolsListResponse(data) {
+		data = filterToolsList(t.toolHeaders, data)
+	}
+
+	t.onMessage(event, data)
+}
+
+// claimToolsListResponse reports whether this message answers a tools/list we
+// sent, consuming the record so a stream carrying several messages only
+// matches the response itself.
+func (t *StreamableHTTPTransport) claimToolsListResponse(data []byte) bool {
+	var envelope struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Result) == 0 {
+		return false
+	}
+
+	id := requestKey(envelope.ID)
+	if id == "" {
+		return false
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.pendingToolsList[id]; !ok {
+		return false
+	}
+	delete(t.pendingToolsList, id)
+	return true
+}
+
+// expectToolsList records that the response to this id will carry tool
+// definitions worth reading.
+func (t *StreamableHTTPTransport) expectToolsList(id string) {
+	if id == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pendingToolsList[id] = struct{}{}
 }
 
 // handleCancellation deals with a notifications/cancelled message and reports
@@ -374,6 +443,12 @@ func (t *StreamableHTTPTransport) setCommonHeaders(req *http.Request, md request
 				req.Header.Set(HeaderMCPName, encodeHeaderValue(md.name))
 			}
 		}
+
+		if md.method == methodToolsCall {
+			for name, value := range paramHeaders(t.toolHeaders.get(md.name), md.params) {
+				req.Header.Set(name, value)
+			}
+		}
 		return
 	}
 
@@ -475,9 +550,7 @@ func (t *StreamableHTTPTransport) openNotificationStream(ctx context.Context) er
 			t.mu.Unlock()
 		}
 
-		if t.onMessage != nil {
-			t.onMessage(evt.Event, evt.Data)
-		}
+		t.deliver(evt.Event, evt.Data)
 	})
 }
 
@@ -503,9 +576,7 @@ func (t *StreamableHTTPTransport) readSSEResponse(ctx context.Context, resp *htt
 			t.mu.Unlock()
 		}
 
-		if t.onMessage != nil {
-			t.onMessage(evt.Event, evt.Data)
-		}
+		t.deliver(evt.Event, evt.Data)
 	})
 
 	if err != nil && t.onError != nil {
