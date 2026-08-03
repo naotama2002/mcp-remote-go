@@ -44,7 +44,7 @@ func TestNewEventSource(t *testing.T) {
 		t.Error("Reconnect should be true by default")
 	}
 
-	if es.connected {
+	if es.IsConnected() {
 		t.Error("Should not be connected initially")
 	}
 
@@ -92,7 +92,7 @@ func TestEventSourceConnect(t *testing.T) {
 		t.Errorf("Connect should not fail: %v", err)
 	}
 
-	if !es.connected {
+	if !es.IsConnected() {
 		t.Error("Should be connected after Connect()")
 	}
 
@@ -149,7 +149,7 @@ func TestEventSourceConnectError(t *testing.T) {
 				t.Errorf("Error should contain '%s', got: %v", tt.expectedErrorMatch, err)
 			}
 
-			if es.connected {
+			if es.IsConnected() {
 				t.Error("Should not be connected after failed Connect()")
 			}
 		})
@@ -286,14 +286,14 @@ func TestEventSourceClose(t *testing.T) {
 		t.Fatalf("Connect failed: %v", err)
 	}
 
-	if !es.connected {
+	if !es.IsConnected() {
 		t.Error("Should be connected")
 	}
 
 	// Close
 	es.Close()
 
-	if es.connected {
+	if es.IsConnected() {
 		t.Error("Should not be connected after Close()")
 	}
 

@@ -107,12 +107,19 @@ func (es *EventSource) Close() {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 
+	// Cancel the context to stop all operations.
+	//
+	// This happens before the connected check, and unconditionally. readEvents
+	// clears connected when the stream ends on its own, so guarding the cancel
+	// on it meant that a stream the server closed left its context live for
+	// the rest of the process -- Close became a no-op precisely when it was
+	// the only thing left to release it. CancelFunc is idempotent, so calling
+	// it again here is free.
+	es.cancel()
+
 	if !es.connected {
 		return
 	}
-
-	// Cancel the context to stop all operations
-	es.cancel()
 
 	// Close the response body
 	if es.response != nil && es.response.Body != nil {
@@ -122,6 +129,14 @@ func (es *EventSource) Close() {
 	}
 
 	es.connected = false
+}
+
+// IsConnected reports whether the stream is currently open. readEvents clears
+// this when the stream ends, so it is written from another goroutine.
+func (es *EventSource) IsConnected() bool {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	return es.connected
 }
 
 // readEvents continuously reads SSE events
