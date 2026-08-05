@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 )
 
 // Era detection.
@@ -131,10 +134,33 @@ type probeResponse struct {
 	} `json:"error"`
 }
 
+// probePayload returns the JSON-RPC message carried by a probe reply.
+//
+// A server answers a request with either a single JSON object or an SSE
+// stream, its choice, and the classification needs the message either way.
+// Reading the raw body as JSON works only for the first, and silently yields
+// "era unknown" for the second -- which is what real servers send.
+func probePayload(contentType string, body []byte) []byte {
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		return body
+	}
+
+	var payload []byte
+	_ = ReadSSEEvents(context.Background(), bytes.NewReader(body), func(evt SSEEvent) {
+		if payload == nil {
+			payload = evt.Data
+		}
+	})
+	if payload == nil {
+		return body
+	}
+	return payload
+}
+
 // classifyProbe reads a probe reply and reports what it proves about the
 // server. isJSONRPC distinguishes a server that speaks the protocol from one
 // that merely returned a status code.
-func classifyProbe(status int, body []byte) (era serverEra, supported []string, isJSONRPC bool) {
+func classifyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bool) {
 	var parsed probeResponse
 	if err := json.Unmarshal(body, &parsed); err != nil || parsed.JSONRPC == "" {
 		return eraUnknown, nil, false

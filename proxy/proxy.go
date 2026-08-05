@@ -297,7 +297,7 @@ func (p *Proxy) probeServer() (serverProfile, error) {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	era, supported, isJSONRPC := classifyProbe(resp.StatusCode, body)
+	era, supported, isJSONRPC := classifyProbe(probePayload(resp.Header.Get("Content-Type"), body))
 
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
