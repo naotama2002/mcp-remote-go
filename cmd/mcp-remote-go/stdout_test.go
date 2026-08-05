@@ -115,7 +115,7 @@ func TestShutdownWritesNothingToStdout(t *testing.T) {
 	defer server.Close()
 
 	// No stdin input, so the proxy stays connected and waits.
-	cmd, stdin, stdout, stderr := startChild(t, "-server", server.URL, "-allow-http", "-port", "0")
+	cmd, _, stdout, stderr := startChild(t, "-server", server.URL, "-allow-http", "-port", "0")
 
 	// Give it time to negotiate and settle before interrupting.
 	deadline := time.Now().Add(5 * time.Second)
@@ -130,27 +130,13 @@ func TestShutdownWritesNothingToStdout(t *testing.T) {
 		t.Fatalf("failed to signal the proxy: %v", err)
 	}
 
-	// Wait for the handler to announce itself before touching stdin. Closing
-	// it first would let the EOF path finish the process on its own and the
-	// signal would never be handled at all.
-	deadline = time.Now().Add(5 * time.Second)
-	for !strings.Contains(stderr.String(), "Shutting down...") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Now release the process. On SIGTERM alone it hangs: Shutdown waits for
-	// the stdio reader, which is parked in a blocking read and never revisits
-	// the cancelled context. That is a separate defect from the one under
-	// test, worked around here rather than papered over.
-	_ = stdin.Close()
-
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 	select {
 	case <-waited:
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
-		t.Fatal("the proxy did not exit after SIGTERM and stdin close")
+		t.Fatal("the proxy did not exit after SIGTERM")
 	}
 
 	if got := stdout.String(); got != "" {
@@ -176,4 +162,52 @@ func TestUsageGoesToStderr(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Usage:") {
 		t.Errorf("usage was not written to stderr; got: %s", stderr.String())
 	}
+}
+
+// TestSignalTerminatesWithStdinIdle is the regression guard for the shutdown
+// hang. stdin is left open and quiet, which is the state a blocking read parks
+// in: Shutdown waited on that reader, and with the context only checked
+// between reads it never came back.
+//
+// It goes unnoticed in normal use because the host closes the pipe on teardown
+// and the resulting EOF is what actually ends the process. A signal on its own
+// has to work too -- that is what SIGTERM is.
+func TestSignalTerminatesWithStdinIdle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"jsonrpc":"2.0","id":0,"result":{}}`)
+	}))
+	defer server.Close()
+
+	cmd, stdin, _, stderr := startChild(t, "-server", server.URL, "-allow-http", "-port", "0")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(stderr.String(), "Connected") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(stderr.String(), "Connected") {
+		t.Fatalf("the proxy never connected; stderr: %s", stderr.String())
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("failed to signal the proxy: %v", err)
+	}
+
+	// stdin stays open for the whole wait: the point is that the signal alone
+	// is enough. Closing it would provide the EOF that masks the defect.
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the proxy did not exit on SIGTERM while stdin was open and idle")
+	}
+
+	_ = stdin.Close()
 }
