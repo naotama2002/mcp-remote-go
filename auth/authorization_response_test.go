@@ -103,17 +103,41 @@ func TestValidateAuthorizationResponse(t *testing.T) {
 		},
 		{
 			name:          "server-reported error is surfaced",
-			query:         url.Values{"error": {"access_denied"}, "error_description": {"user said no"}},
+			query:         url.Values{"error": {"access_denied"}, "error_description": {"user said no"}, "state": {state}},
 			expectedState: state,
 			metadata:      plainMetadata,
 			wantErr:       "user said no",
 		},
 		{
 			name:          "server-reported error without description",
-			query:         url.Values{"error": {"invalid_scope"}},
+			query:         url.Values{"error": {"invalid_scope"}, "state": {state}},
 			expectedState: state,
 			metadata:      plainMetadata,
 			wantErr:       "invalid_scope",
+		},
+		{
+			// The callback listens on loopback, so any page the user has open
+			// can reach it. An unauthenticated error must not be able to abort
+			// a live authorization, nor get its own text surfaced.
+			name:          "an error without state is rejected as forged",
+			query:         url.Values{"error": {"access_denied"}, "error_description": {"attacker text"}},
+			expectedState: state,
+			metadata:      plainMetadata,
+			wantErr:       "state mismatch",
+		},
+		{
+			name:          "an error with a wrong state is rejected as forged",
+			query:         url.Values{"error": {"access_denied"}, "state": {"forged"}},
+			expectedState: state,
+			metadata:      plainMetadata,
+			wantErr:       "state mismatch",
+		},
+		{
+			name:          "an error from another issuer is rejected",
+			query:         url.Values{"error": {"access_denied"}, "state": {state}, "iss": {"https://evil.example.com"}},
+			expectedState: state,
+			metadata:      plainMetadata,
+			wantErr:       "issuer mismatch",
 		},
 		{
 			name:          "missing metadata is rejected",
@@ -147,6 +171,23 @@ func TestValidateAuthorizationResponse(t *testing.T) {
 
 // TestBuildAuthorizationURLIncludesState checks the request side of the CSRF
 // binding: the state that lands in the URL is the one the callback will demand.
+// TestForgedErrorTextIsNotSurfaced checks the rejection reason comes from us,
+// not from the unauthenticated caller: the description would otherwise reach
+// the user's browser and the log as though the authorization server said it.
+func TestForgedErrorTextIsNotSurfaced(t *testing.T) {
+	err := validateAuthorizationResponse(
+		url.Values{"error": {"access_denied"}, "error_description": {"CONTACT-ATTACKER-AT-EVIL"}},
+		"the-expected-state",
+		&ServerMetadata{Issuer: "https://as.example.com"},
+	)
+	if err == nil {
+		t.Fatal("expected the forged error to be rejected")
+	}
+	if strings.Contains(err.Error(), "CONTACT-ATTACKER-AT-EVIL") {
+		t.Errorf("error %q repeats the unauthenticated description", err.Error())
+	}
+}
+
 func TestBuildAuthorizationURLIncludesState(t *testing.T) {
 	c := &Coordinator{
 		callbackPort:   3334,
