@@ -302,6 +302,14 @@ func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL stri
 func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	clientInfo, err := c.loadClientInfo()
 	if err == nil && c.clientInfoMatchesServer(clientInfo) {
+		// Record which authorization server the credentials were accepted
+		// for, so an entry is only ever unbound once.
+		if clientInfo.RegisteredIssuer == "" && c.serverMetadata != nil && c.serverMetadata.Issuer != "" {
+			clientInfo.RegisteredIssuer = c.serverMetadata.Issuer
+			if saveErr := c.saveClientInfo(clientInfo); saveErr != nil {
+				log.Printf("Warning: failed to record the issuer for cached client info: %v", saveErr)
+			}
+		}
 		return clientInfo, nil
 	}
 
@@ -356,15 +364,47 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	return &clientInfoResp, nil
 }
 
+// clientInfoMatchesServer reports whether cached credentials may be presented
+// to the authorization server currently discovered.
+//
+// Credentials belong to the server that issued them. Protected Resource
+// Metadata can name a different authorization server than it did last time, so
+// reuse without checking would send a client_id -- and any secret alongside it
+// -- to a server it was never registered with.
+//
+// Entries written before the issuer was recorded cannot be checked that way,
+// and simply rejecting them is not free: falling through to registration is
+// what fails when the server offers none, and that cached credential is then
+// the only one available. So the answer depends on what is at stake and on
+// whether there is any alternative.
 func (c *Coordinator) clientInfoMatchesServer(clientInfo *ClientInfo) bool {
 	if c.serverMetadata == nil || clientInfo == nil {
 		return true
 	}
-	if clientInfo.RegisteredIssuer == "" {
-		// Legacy cache entry without issuer; still usable.
-		return true
+
+	if clientInfo.RegisteredIssuer != "" {
+		return clientInfo.RegisteredIssuer == c.serverMetadata.Issuer
 	}
-	return clientInfo.RegisteredIssuer == c.serverMetadata.Issuer
+
+	if clientInfo.ClientSecret != "" {
+		// A secret is never worth presenting to a server that cannot be shown
+		// to be the one holding it.
+		log.Println("Discarding cached client credentials: they carry a secret but no recorded issuer")
+		return false
+	}
+
+	if c.serverMetadata.RegistrationEndpoint != "" {
+		// Registering again costs one request and settles the question.
+		log.Println("Re-registering: the cached client_id has no recorded issuer")
+		return false
+	}
+
+	// Nothing to re-register with, and a public client_id carries no secret to
+	// leak. Using it is better than failing outright, and loadOrRegisterClient
+	// binds it to this issuer so the question is not reopened.
+	log.Printf("Using a cached client_id with no recorded issuer against %s: "+
+		"the server offers no dynamic registration, so there is no alternative", c.serverMetadata.Issuer)
+	return true
 }
 
 // startCallbackServer starts the HTTP server to receive the OAuth callback.
