@@ -353,9 +353,11 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 			Client:       p.client,
 			Headers:      p.headers,
 			GetAuthToken: p.getAuthToken,
-			// 2026-07-28 removed the GET notification stream. Knowing the era
-			// up front saves opening a request that can only be answered 405.
-			SkipNotificationStream: p.currentProfile().era == eraModern,
+			// A server that cannot serve any revision older than 2026-07-28
+			// has no GET notification stream under any circumstances. For
+			// every other server the transport decides, once the local client
+			// has said which revision it speaks.
+			SkipNotificationStream: !p.currentProfile().supportsLegacy(),
 		})
 	default: // SSE
 		return NewSSETransport(SSETransportConfig{

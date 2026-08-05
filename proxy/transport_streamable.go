@@ -50,9 +50,15 @@ type StreamableHTTPTransport struct {
 	onMessage func(event string, data []byte)
 	onError   func(err error)
 
-	// skipNotificationStream suppresses the GET stream for servers already
-	// known to have dropped it.
+	// skipNotificationStream suppresses the GET stream for servers that cannot
+	// serve a revision which has one.
 	skipNotificationStream bool
+
+	// notifyCtx is the connection context, held from Connect so the GET stream
+	// can be started later, once the client's revision is known.
+	// notifyStarted keeps that to one attempt.
+	notifyCtx     context.Context
+	notifyStarted bool
 
 	// toolHeaders remembers the x-mcp-header bindings advertised in tools/list
 	// so a later tools/call can be decorated with them, and pendingToolsList
@@ -78,9 +84,11 @@ type StreamableHTTPTransportConfig struct {
 	Headers      map[string]string
 	GetAuthToken func() string
 
-	// SkipNotificationStream suppresses the GET notification stream, which
-	// 2026-07-28 removed. Leave it false when the era is unknown: the
-	// transport handles the 405 and stops on its own.
+	// SkipNotificationStream suppresses the GET notification stream outright.
+	// Set it only when the server cannot serve any revision that has one;
+	// otherwise leave it false and let the transport decide from the client's
+	// declared revision, since that is what determines whether the stream
+	// exists for this connection.
 	SkipNotificationStream bool
 }
 
@@ -100,19 +108,49 @@ func NewStreamableHTTPTransport(cfg StreamableHTTPTransportConfig) *StreamableHT
 }
 
 func (t *StreamableHTTPTransport) Connect(ctx context.Context) error {
-	// Streamable HTTP does not require a persistent connection on Connect.
-	// Optionally open a GET request for server-initiated notifications.
-	if t.skipNotificationStream {
-		log.Println("Skipping GET notification stream: the server's protocol revision does not have one")
-		return nil
-	}
-	t.startNotificationStream(ctx)
+	// Streamable HTTP needs no persistent connection here.
+	//
+	// The GET notification stream is deliberately not opened yet. Whether the
+	// connection needs one depends on the revision the *local client* uses,
+	// and no message has arrived to say which that is. Opening it on the
+	// server's revision instead would drop the stream for a legacy client
+	// talking to a server that also speaks 2026-07-28 -- and on that revision
+	// the standalone GET stream is how server-initiated messages arrive at
+	// all. It is started from Send, once the client has identified itself.
+	t.mu.Lock()
+	t.notifyCtx = ctx
+	t.mu.Unlock()
 	return nil
+}
+
+// ensureNotificationStream opens the GET stream if this connection turns out
+// to need one: only revisions before 2026-07-28 have it, and only the local
+// client's own traffic says which revision is in play.
+func (t *StreamableHTTPTransport) ensureNotificationStream() {
+	t.mu.Lock()
+	if t.skipNotificationStream || t.notifyStarted || t.notifyCtx == nil {
+		t.mu.Unlock()
+		return
+	}
+	if t.protocolVersion >= ProtocolVersion20260728 {
+		// The client is modern; this revision has no GET stream to open.
+		t.mu.Unlock()
+		return
+	}
+	t.notifyStarted = true
+	ctx := t.notifyCtx
+	t.mu.Unlock()
+
+	t.startNotificationStream(ctx)
 }
 
 func (t *StreamableHTTPTransport) Send(ctx context.Context, message []byte) error {
 	md := parseRequestMetadata(message)
 	t.observeProtocolVersion(md)
+
+	// The client has now identified its revision, which is what decides
+	// whether this connection has a GET notification stream.
+	t.ensureNotificationStream()
 
 	if handled := t.handleCancellation(md); handled {
 		return nil
