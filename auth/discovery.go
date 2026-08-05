@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 
 	"github.com/naotama2002/mcp-remote-go/internal/httpclient"
 )
@@ -42,20 +43,53 @@ func (s *StandardOAuthDiscovery) Name() string {
 }
 
 func (s *StandardOAuthDiscovery) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
-	wellKnownURL, err := s.buildWellKnownURL(serverURL, "oauth-authorization-server")
+	candidates, err := wellKnownCandidates(serverURL, "oauth-authorization-server")
 	if err != nil {
 		return nil, err
 	}
 
-	return s.fetchMetadata(ctx, wellKnownURL)
+	var firstErr error
+	for _, candidate := range candidates {
+		metadata, err := s.fetchMetadata(ctx, candidate)
+		if err == nil {
+			return metadata, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
 }
 
-func (s *StandardOAuthDiscovery) buildWellKnownURL(serverURL, endpoint string) (string, error) {
-	parsed, err := url.Parse(serverURL)
+// wellKnownCandidates returns the metadata URLs to try for an issuer, most
+// specific first.
+//
+// An issuer may carry a path -- GitHub's is https://github.com/login/oauth --
+// and the well-known URL is not built by appending to it. RFC 8414 §3.1 inserts
+// the well-known segment *between the host and the path*, while OpenID Connect
+// Discovery appends it to the end, so an issuer with a path has two plausible
+// locations and both are tried. Dropping the path, as this used to, produces a
+// URL belonging to an entirely different issuer.
+func wellKnownCandidates(issuer, endpoint string) ([]string, error) {
+	parsed, err := url.Parse(issuer)
 	if err != nil {
-		return "", fmt.Errorf("invalid server URL: %w", err)
+		return nil, fmt.Errorf("invalid server URL: %w", err)
 	}
-	return fmt.Sprintf("%s://%s/.well-known/%s", parsed.Scheme, parsed.Host, endpoint), nil
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("issuer must have a scheme and host: %s", issuer)
+	}
+
+	origin := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+	path := strings.TrimSuffix(parsed.Path, "/")
+
+	if path == "" {
+		return []string{fmt.Sprintf("%s/.well-known/%s", origin, endpoint)}, nil
+	}
+
+	return []string{
+		fmt.Sprintf("%s/.well-known/%s%s", origin, endpoint, path),
+		fmt.Sprintf("%s%s/.well-known/%s", origin, path, endpoint),
+	}, nil
 }
 
 func (s *StandardOAuthDiscovery) fetchMetadata(ctx context.Context, metadataURL string) (*ServerMetadata, error) {
@@ -88,20 +122,22 @@ func (o *OpenIDConnectDiscovery) Name() string {
 }
 
 func (o *OpenIDConnectDiscovery) Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
-	wellKnownURL, err := o.buildWellKnownURL(serverURL)
+	candidates, err := wellKnownCandidates(serverURL, "openid-configuration")
 	if err != nil {
 		return nil, err
 	}
 
-	return o.fetchMetadata(ctx, wellKnownURL)
-}
-
-func (o *OpenIDConnectDiscovery) buildWellKnownURL(serverURL string) (string, error) {
-	parsed, err := url.Parse(serverURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid server URL: %w", err)
+	var firstErr error
+	for _, candidate := range candidates {
+		metadata, err := o.fetchMetadata(ctx, candidate)
+		if err == nil {
+			return metadata, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	return fmt.Sprintf("%s://%s/.well-known/openid-configuration", parsed.Scheme, parsed.Host), nil
+	return nil, firstErr
 }
 
 func (o *OpenIDConnectDiscovery) fetchMetadata(ctx context.Context, metadataURL string) (*ServerMetadata, error) {
