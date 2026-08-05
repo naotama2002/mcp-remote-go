@@ -60,7 +60,9 @@ func main() {
 	applyEnvOverrides(&serverURL, &callbackPort, &allowHTTP, &transportMode, &httpProxy, &headers)
 
 	if serverURL == "" {
-		fmt.Println("Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-https-proxy <proxy-url>] [-header 'Key:Value'] ...")
+		// Diagnostics go to stderr: on the stdio transport stdout carries the
+		// JSON-RPC stream and nothing else.
+		fmt.Fprintln(os.Stderr, "Usage: mcp-remote-go -server <server-url> [-port <callback-port>] [-allow-http] [-transport auto|streamable-http|sse] [-https-proxy <proxy-url>] [-header 'Key:Value'] ...")
 		os.Exit(1)
 	}
 
@@ -102,7 +104,10 @@ func main() {
 
 	go func() {
 		<-signals
-		fmt.Println("Shutting down...")
+		// log writes to stderr. Announcing this on stdout put the bytes
+		// "Shutting down..." into the JSON-RPC stream, and the client failed
+		// trying to parse them as a message.
+		log.Println("Shutting down...")
 		p.Shutdown()
 		os.Exit(0)
 	}()
