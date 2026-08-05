@@ -31,8 +31,15 @@ forwarded through the `initialize` handshake as before, and a client on
 2026-07-28 has its per-request `_meta` mirrored into the routing headers that
 revision requires.
 
-Bridging a client and a server on *different* revisions is not yet supported —
-see `test/conformance` for what is verified today.
+Both sides must therefore be on the same side of the 2026-07-28 line. Every
+combination works except one: a client older than 2026-07-28 talking to a
+server that has dropped the `initialize` handshake entirely. The spec gives
+such a client no way to negotiate forward, so only a translating proxy could
+connect them — deliberately out of scope here. The proxy detects the case
+during auto-negotiation and says so at startup rather than letting it surface
+as an error on the first tool call.
+
+See `test/conformance` for what is verified against the official MCP SDK.
 
 ## Installation
 
