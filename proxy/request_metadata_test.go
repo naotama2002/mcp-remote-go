@@ -115,6 +115,9 @@ func TestRequestKey(t *testing.T) {
 		{"absent id", ``, ""},
 		{"null id", `null`, ""},
 		{"object id is not a valid id", `{"a":1}`, ""},
+		{"negative zero keys as zero", `-0`, "n:0"},
+		{"a malformed literal is not an id", `007`, ""},
+		{"an id beyond int64 keeps its literal", `18446744073709551617`, "n:18446744073709551617"},
 	}
 
 	for _, tt := range tests {
@@ -129,6 +132,22 @@ func TestRequestKey(t *testing.T) {
 	// cancelling one must never reach the other.
 	if requestKey([]byte(`1`)) == requestKey([]byte(`"1"`)) {
 		t.Error("numeric and string ids collide")
+	}
+}
+
+// TestRequestKeyPreservesLargeIntegers guards the precision of the key. Ids
+// are compared to route cancellations, so two distinct ids sharing a key means
+// abandoning one request closes another one's stream.
+func TestRequestKeyPreservesLargeIntegers(t *testing.T) {
+	// The first integer float64 cannot represent, and its neighbour.
+	const a = `9007199254740992`
+	const b = `9007199254740993`
+
+	if requestKey([]byte(a)) == requestKey([]byte(b)) {
+		t.Fatalf("ids %s and %s share the key %q", a, b, requestKey([]byte(a)))
+	}
+	if got := requestKey([]byte(b)); got != "n:"+b {
+		t.Errorf("requestKey(%s) = %q, want the exact value", b, got)
 	}
 }
 

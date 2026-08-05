@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"strconv"
@@ -88,15 +89,37 @@ func requestKey(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+
+	// Decode numbers as their literal text rather than through float64, which
+	// holds only integers up to 2^53: past that, 9007199254740993 and
+	// 9007199254740992 become the same key, and a cancellation aimed at one
+	// request would close the other one's stream.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := decoder.Decode(&value); err != nil {
 		return ""
 	}
+	// Anything left over means the id was not a single well-formed JSON value.
+	// Without this, `007` decodes as 0 and silently keys to another id.
+	if decoder.More() {
+		return ""
+	}
+
 	switch v := value.(type) {
 	case string:
 		return "s:" + v
-	case float64:
-		return "n:" + strconv.FormatFloat(v, 'f', -1, 64)
+	case json.Number:
+		// Plain decimal integers are keyed by value, so -0 and 0 agree. Any
+		// other numeric form -- an exponent or a fractional part -- keeps its
+		// own literal, so 1e2 and 100 are treated as different ids. JSON-RPC
+		// says ids should not have fractional parts, and a lookup that misses
+		// is a better failure than one that hits the wrong request.
+		if i, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
+			return "n:" + strconv.FormatInt(i, 10)
+		}
+		return "n:" + v.String()
 	default:
 		return ""
 	}
