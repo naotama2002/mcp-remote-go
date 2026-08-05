@@ -345,21 +345,49 @@ func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 }
 
 // processStdioInput reads messages from stdin and forwards them to the server
+// stdioRead is one outcome of reading a line from stdin.
+type stdioRead struct {
+	line string
+	err  error
+}
+
+// processStdioInput reads messages from stdin and forwards them to the server.
+//
+// The read runs on a goroutine of its own because it cannot be interrupted:
+// selecting on the context around a blocking ReadString only checks it between
+// reads, so a cancelled context went unnoticed while stdin sat idle and
+// Shutdown waited here forever. That goroutine is deliberately not part of the
+// WaitGroup -- it may stay parked on a read that never returns, it holds
+// nothing, and it ends with the process.
 func (p *Proxy) processStdioInput() {
 	defer p.wg.Done()
+
+	reads := make(chan stdioRead)
+	go func() {
+		for {
+			line, err := p.stdioReader.ReadString('\n')
+			select {
+			case reads <- stdioRead{line: line, err: err}:
+			case <-p.ctx.Done():
+				return
+			}
+			if err != nil && errors.Is(err, io.EOF) {
+				return
+			}
+		}
+	}()
 
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		default:
-			line, err := p.stdioReader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
+		case read := <-reads:
+			if read.err != nil {
+				if errors.Is(read.err, io.EOF) {
 					log.Println("STDIO input closed")
-					// Close transport and cancel context directly instead of calling
-					// Shutdown() to avoid deadlock (Shutdown calls wg.Wait, but this
-					// goroutine hasn't called wg.Done yet via defer).
+					// Close the transport and cancel directly rather than
+					// calling Shutdown, which waits on the WaitGroup this
+					// goroutine has not yet released.
 					if p.transport != nil {
 						if closeErr := p.transport.Close(); closeErr != nil {
 							log.Printf("Warning: failed to close transport: %v", closeErr)
@@ -368,27 +396,32 @@ func (p *Proxy) processStdioInput() {
 					p.cancel()
 					return
 				}
-				log.Printf("Error reading from STDIO: %v", err)
+				log.Printf("Error reading from STDIO: %v", read.err)
 				continue
 			}
 
-			var msg map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &msg); err == nil {
-				if method, ok := msg["method"].(string); ok {
-					log.Printf("[Local→Remote] %s", method)
-				} else if id, ok := msg["id"].(float64); ok {
-					log.Printf("[Local→Remote] Response ID: %v", id)
-				}
-			}
-
-			if p.transport == nil {
-				log.Printf("Error sending to server: not connected")
-				continue
-			}
-			if err := p.transport.Send(p.ctx, []byte(line)); err != nil {
-				log.Printf("Error sending to server: %v", err)
-			}
+			p.forwardToServer(read.line)
 		}
+	}
+}
+
+// forwardToServer logs a client message and hands it to the transport.
+func (p *Proxy) forwardToServer(line string) {
+	var msg map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &msg); err == nil {
+		if method, ok := msg["method"].(string); ok {
+			log.Printf("[Local→Remote] %s", method)
+		} else if id, ok := msg["id"].(float64); ok {
+			log.Printf("[Local→Remote] Response ID: %v", id)
+		}
+	}
+
+	if p.transport == nil {
+		log.Printf("Error sending to server: not connected")
+		return
+	}
+	if err := p.transport.Send(p.ctx, []byte(line)); err != nil {
+		log.Printf("Error sending to server: %v", err)
 	}
 }
 
