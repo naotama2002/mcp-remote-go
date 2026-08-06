@@ -312,14 +312,24 @@ func (p *Proxy) probeServer() (serverProfile, error) {
 		return serverProfile{transport: TransportModeStreamableHTTP, era: era, supportedVersions: supported}, nil
 
 	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
-		// No MCP endpoint here, and no JSON-RPC error to say otherwise: this
-		// is the signature of a server hosting only the deprecated transport.
+		// Nothing here answers POST, and no JSON-RPC error says otherwise:
+		// the signature of a server hosting only the deprecated transport,
+		// whose POST endpoint is a different URL.
 		log.Printf("Server returned %d without a JSON-RPC body, falling back to SSE transport", resp.StatusCode)
 		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
 
 	default:
-		log.Printf("Unexpected status %d from probe, falling back to SSE", resp.StatusCode)
-		return serverProfile{transport: TransportModeSSE, era: eraUnknown}, nil
+		// The endpoint took the POST and rejected what was in it. That places
+		// it as a Streamable HTTP endpoint on a revision older than the one
+		// the probe asked for -- servers that predate server/discover reject
+		// it however they like, plain text included.
+		//
+		// Reading this as "not Streamable HTTP" sent such servers to the
+		// deprecated transport, where the opening GET fails on a missing
+		// session id and the connection is lost for good.
+		log.Printf("Server returned %d without a JSON-RPC body; it does not implement server/discover, "+
+			"so using Streamable HTTP with the revision the client asks for", resp.StatusCode)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: eraLegacy}, nil
 	}
 }
 

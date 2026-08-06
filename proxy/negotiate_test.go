@@ -189,6 +189,83 @@ func TestNegotiateDetectsModernOnlyServer(t *testing.T) {
 	}
 }
 
+// TestNegotiateKeepsStreamableHTTPOnPlainTextRejection covers the server that
+// exposed this: a Streamable HTTP endpoint on a revision that predates
+// server/discover, which rejects the probe with a plain-text 400 rather than a
+// JSON-RPC error.
+//
+// Reading that as "not Streamable HTTP" sent it to the deprecated transport,
+// where the opening GET is answered "GET requires an Mcp-Session-Id header"
+// and the connection is lost. The endpoint took the POST; that is what places
+// it.
+func TestNegotiateKeepsStreamableHTTPOnPlainTextRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, "Bad Request: unknown method")
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, "Bad Request: GET requires an Mcp-Session-Id header")
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "plaintext-400-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	if err := proxy.connectToServer(); err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if got := proxy.currentTransportMode(); got != TransportModeStreamableHTTP {
+		t.Errorf("transport = %q, want streamable-http", got)
+	}
+	if got := proxy.currentProfile().era; got != eraLegacy {
+		t.Errorf("era = %v, want legacy", got)
+	}
+}
+
+// TestNegotiateFallsBackToSSEOnlyWhenPostIsUnserved pins the other side of the
+// rule: the deprecated transport is chosen when nothing answers POST here, not
+// merely because a request was rejected.
+func TestNegotiateFallsBackToSSEOnlyWhenPostIsUnserved(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					w.WriteHeader(status)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, _ := w.(http.Flusher)
+				_, _ = fmt.Fprintf(w, "event: endpoint\ndata: /message\n\n")
+				flusher.Flush()
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+
+			proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "unserved-post-test", TransportModeAuto)
+			if err != nil {
+				t.Fatalf("Failed to create proxy: %v", err)
+			}
+			defer proxy.Shutdown()
+
+			if err := proxy.connectToServer(); err != nil {
+				t.Fatalf("connectToServer failed: %v", err)
+			}
+			if got := proxy.currentTransportMode(); got != TransportModeSSE {
+				t.Errorf("transport = %q, want sse", got)
+			}
+		})
+	}
+}
+
 func TestNegotiateTransportFallbackToSSE(t *testing.T) {
 	// Server that rejects POST (no Streamable HTTP) but serves SSE on GET
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
