@@ -3,9 +3,38 @@
 # Please see the documentation for all configuration options:
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
+# 更新をグループ化して 1 PR にまとめる方針。
+# 個別 PR が並ぶと同じ pnpm-lock.yaml を取り合って毎回コンフリクトするため。
+#
+# npm: major は影響範囲が読めない (Expo SDK のメジャー更新など) ので
+#      グループから外し、従来どおり単独 PR で出す。
+# github-actions: major bump (actions/checkout v4 -> v7 など) が常態で、
+#      lockfile も触らないため major も含めてまとめる。
+
 version: 2
 updates:
-  - package-ecosystem: "gomod"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
