@@ -179,16 +179,22 @@ func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (stri
 	return authURL, nil
 }
 
-// WaitForAuthCode waits for the authorization code from the callback
-func (c *Coordinator) WaitForAuthCode() (string, error) {
-	// Wait for the code from the callback
+// WaitForAuthCode waits for the authorization code from the callback.
+//
+// The context is the caller's own reason to still care about the answer. A proxy
+// whose client has closed its pipe has none: waiting on a browser window for it
+// keeps the callback port and a stale authorization alive for minutes, and the
+// user is left with a window that authorizes nothing.
+func (c *Coordinator) WaitForAuthCode(ctx context.Context) (string, error) {
 	select {
 	case result := <-c.callbackChan:
 		if result.err != nil {
 			return "", result.err
 		}
 		return result.code, nil
-	case <-time.After(5 * time.Minute):
+	case <-ctx.Done():
+		return "", fmt.Errorf("stopped waiting for the authorization code: %w", ctx.Err())
+	case <-time.After(authCodeTimeout):
 		return "", errors.New("timeout waiting for authorization code")
 	}
 }

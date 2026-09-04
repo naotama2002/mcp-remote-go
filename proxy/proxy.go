@@ -46,7 +46,10 @@ type Proxy struct {
 	transport     Transport
 	stdioReader   *bufio.Reader
 	stdioWriter   *bufio.Writer
-	writerMu      sync.Mutex
+	// stdin is the client's messages, read from startup so that the pipe
+	// closing is noticed even while an authorization flow is in progress.
+	stdin    *stdinQueue
+	writerMu sync.Mutex
 	// stateMu guards transport, transportMode and serverProfile. Reconnection
 	// runs on the transport's error callback goroutine and replaces all three
 	// while the stdio reader is using them.
@@ -165,6 +168,12 @@ func buildHTTPClient(proxyURL string) (*http.Client, error) {
 func (p *Proxy) Start() error {
 	log.Println("Starting MCP proxy")
 	log.Println("Connecting to remote server:", p.serverURL)
+
+	// Start reading the client's end before connecting, not after. Connecting
+	// can mean waiting on an authorization flow, and a client that gives up
+	// during it closes this pipe; see stdinQueue for what reading late cost.
+	p.stdin = newStdinQueue(p.stdioReader)
+	go p.stdin.pump(p.handleStdioClosed)
 
 	if err := p.connectToServer(); err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
@@ -427,6 +436,10 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 	}
 }
 
+// openBrowserFunc is indirected so tests can assert whether the proxy would put
+// a browser window in front of the user.
+var openBrowserFunc = openBrowser
+
 // openBrowser opens the specified URL in the default browser
 func openBrowser(rawURL string) error {
 	parsedURL, err := url.Parse(rawURL)
@@ -441,33 +454,66 @@ func openBrowser(rawURL string) error {
 	return browser.OpenURL(rawURL)
 }
 
-// handleAuthentication runs the OAuth flow. When the triggering 401 carried a
+// handleAuthentication obtains a token for the server and reconnects.
+//
+// The interactive part runs under a per-server lock, so a second proxy for the
+// same server waits for this one's token instead of sending the user a second
+// browser window for the same account. When the triggering 401 carried a
 // WWW-Authenticate Bearer challenge, its resource_metadata URL (RFC 9728 §5.1)
-// is forwarded to discovery.
+// is forwarded to discovery and its scope (RFC 6750 §3.1) to the authorization
+// request.
 func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 	var initOpts []auth.InitOption
 	if wwwAuthenticate != "" {
-		if challenge, ok := auth.ParseWWWAuthenticate(wwwAuthenticate); ok && challenge.ResourceMetadata != "" {
-			log.Printf("Using resource_metadata URL from WWW-Authenticate: %s", challenge.ResourceMetadata)
-			initOpts = append(initOpts, auth.WithResourceMetadataURL(challenge.ResourceMetadata))
+		if challenge, ok := auth.ParseWWWAuthenticate(wwwAuthenticate); ok {
+			if challenge.ResourceMetadata != "" {
+				log.Printf("Using resource_metadata URL from WWW-Authenticate: %s", challenge.ResourceMetadata)
+				initOpts = append(initOpts, auth.WithResourceMetadataURL(challenge.ResourceMetadata))
+			}
+			if challenge.Scope != "" {
+				log.Printf("Requesting scope from WWW-Authenticate: %s", challenge.Scope)
+				initOpts = append(initOpts, auth.WithChallengeScope(challenge.Scope))
+			}
 		}
 	}
 
-	authURL, err := p.authCoord.InitializeAuth(p.serverURL, initOpts...)
+	err := p.authCoord.AuthorizeExclusively(p.ctx, func() error {
+		return p.authorize(initOpts)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize auth: %w", err)
 	}
 
+	// Reached whether this process authorized or another one did, since either
+	// way there is now a token to connect with.
+	return p.connectToServer()
+}
+
+// authorize sends the user through the authorization server and stores the
+// tokens the returned code buys.
+func (p *Proxy) authorize(initOpts []auth.InitOption) error {
+	authURL, err := p.authCoord.InitializeAuth(p.serverURL, initOpts...)
+	if err != nil {
+		return err
+	}
+
+	// Discovery and registration take requests of their own, and the client may
+	// have closed its pipe during them. Opening a browser now would put a window
+	// in front of the user that authorizes a connection nobody is waiting for.
+	if err := p.ctx.Err(); err != nil {
+		return fmt.Errorf("abandoning authorization, the client is gone: %w", err)
+	}
+
 	log.Println("Please authorize access in your browser at:", authURL)
 
-	if err := openBrowser(authURL); err != nil {
+	if err := openBrowserFunc(authURL); err != nil {
 		log.Printf("Failed to open browser automatically: %v", err)
 		log.Println("Please open the URL manually in your browser.")
 	} else {
 		log.Println("Opening browser...")
 	}
 
-	code, err := p.authCoord.WaitForAuthCode()
+	code, err := p.authCoord.WaitForAuthCode(p.ctx)
 	if err != nil {
 		return fmt.Errorf("auth code retrieval failed: %w", err)
 	}
@@ -483,68 +529,37 @@ func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 		return fmt.Errorf("failed to save tokens: %w", err)
 	}
 
-	return p.connectToServer()
+	return nil
 }
 
-// processStdioInput reads messages from stdin and forwards them to the server
-// stdioRead is one outcome of reading a line from stdin.
-type stdioRead struct {
-	line string
-	err  error
-}
-
-// processStdioInput reads messages from stdin and forwards them to the server.
-//
-// The read runs on a goroutine of its own because it cannot be interrupted:
-// selecting on the context around a blocking ReadString only checks it between
-// reads, so a cancelled context went unnoticed while stdin sat idle and
-// Shutdown waited here forever. That goroutine is deliberately not part of the
-// WaitGroup -- it may stay parked on a read that never returns, it holds
-// nothing, and it ends with the process.
+// processStdioInput forwards the client's messages to the server, in order, from
+// the queue the reader has been filling since the proxy started.
 func (p *Proxy) processStdioInput() {
 	defer p.wg.Done()
 
-	reads := make(chan stdioRead)
-	go func() {
-		for {
-			line, err := p.stdioReader.ReadString('\n')
-			select {
-			case reads <- stdioRead{line: line, err: err}:
-			case <-p.ctx.Done():
-				return
-			}
-			if err != nil && errors.Is(err, io.EOF) {
-				return
-			}
-		}
-	}()
-
 	for {
-		select {
-		case <-p.ctx.Done():
+		line, ok := p.stdin.next(p.ctx)
+		if !ok {
 			return
-		case read := <-reads:
-			if read.err != nil {
-				if errors.Is(read.err, io.EOF) {
-					log.Println("STDIO input closed")
-					// Close the transport and cancel directly rather than
-					// calling Shutdown, which waits on the WaitGroup this
-					// goroutine has not yet released.
-					if t := p.currentTransport(); t != nil {
-						if closeErr := t.Close(); closeErr != nil {
-							log.Printf("Warning: failed to close transport: %v", closeErr)
-						}
-					}
-					p.cancel()
-					return
-				}
-				log.Printf("Error reading from STDIO: %v", read.err)
-				continue
-			}
+		}
+		p.forwardToServer(line)
+	}
+}
 
-			p.forwardToServer(read.line)
+// handleStdioClosed reacts to the client closing its end of the pipe, which is
+// how an MCP host says it is finished with this server.
+//
+// The transport is closed and the context cancelled directly rather than through
+// Shutdown, which waits on the WaitGroup that the forwarding goroutine is in.
+func (p *Proxy) handleStdioClosed() {
+	log.Println("STDIO input closed")
+
+	if t := p.currentTransport(); t != nil {
+		if err := t.Close(); err != nil {
+			log.Printf("Warning: failed to close transport: %v", err)
 		}
 	}
+	p.cancel()
 }
 
 // forwardToServer logs a client message and hands it to the transport.
