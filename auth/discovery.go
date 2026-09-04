@@ -238,6 +238,7 @@ func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL str
 		oauthDiscovery := NewStandardOAuthDiscovery(p.client)
 		metadata, err := oauthDiscovery.Discover(ctx, authServer)
 		if err == nil {
+			metadata.ResourceScopesSupported = prm.ScopesSupported
 			return metadata, nil
 		}
 
@@ -245,6 +246,7 @@ func (p *ProtectedResourceDiscovery) Discover(ctx context.Context, serverURL str
 		oidcDiscovery := NewOpenIDConnectDiscovery(p.client)
 		metadata, err = oidcDiscovery.Discover(ctx, authServer)
 		if err == nil {
+			metadata.ResourceScopesSupported = prm.ScopesSupported
 			return metadata, nil
 		}
 	}

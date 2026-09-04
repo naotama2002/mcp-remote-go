@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,7 +51,17 @@ type ServerMetadata struct {
 	JWKSUri                string   `json:"jwks_uri,omitempty"`
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
-	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
+	// TokenEndpointAuthMethodsSupported lists how a client may authenticate at
+	// the token endpoint (RFC 8414 §2). Declaring a method absent from this
+	// list is what registration is rejected for.
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
+	// ResourceScopesSupported carries the `scopes_supported` list published by
+	// the protected resource itself (RFC 9728 §2), not by the authorization
+	// server. Those are the scopes that grant access to this MCP server, so
+	// they -- and not the authorization server's full catalogue -- are what an
+	// authorization request should ask for.
+	ResourceScopesSupported []string `json:"resource_scopes_supported,omitempty"`
+	GrantTypesSupported     []string `json:"grant_types_supported,omitempty"`
 	// AuthorizationResponseIssParameterSupported reports whether the server
 	// returns the `iss` parameter on authorization responses (RFC 9207 §3).
 	// When true, a response without `iss` is rejected.
@@ -71,6 +83,7 @@ type Coordinator struct {
 	clientInfo     *ClientInfo
 	serverMetadata *ServerMetadata
 	resource       string // RFC 8707 canonical resource URI, reused across the flow
+	challengeScope string // `scope` from the WWW-Authenticate challenge that triggered this flow
 	codeVerifier   string
 	state          string // CSRF binding between the authorization request and its callback
 	authMutex      sync.Mutex
@@ -98,6 +111,7 @@ type InitOption func(*initConfig)
 
 type initConfig struct {
 	resourceMetadataURL string
+	challengeScope      string
 }
 
 // WithResourceMetadataURL passes a Protected Resource Metadata URL extracted
@@ -106,6 +120,16 @@ type initConfig struct {
 func WithResourceMetadataURL(url string) InitOption {
 	return func(c *initConfig) {
 		c.resourceMetadataURL = url
+	}
+}
+
+// WithChallengeScope passes the `scope` parameter of the WWW-Authenticate
+// challenge that triggered the flow (RFC 6750 §3.1). A resource server that
+// names the scopes it wants is stating them for this exact request, so the
+// value takes precedence over anything discovery advertises.
+func WithChallengeScope(scope string) InitOption {
+	return func(c *initConfig) {
+		c.challengeScope = scope
 	}
 }
 
@@ -124,6 +148,7 @@ func (c *Coordinator) InitializeAuth(serverURL string, opts ...InitOption) (stri
 		return "", fmt.Errorf("failed to derive canonical resource URI: %w", err)
 	}
 	c.resource = resource
+	c.challengeScope = normalizeScope(cfg.challengeScope)
 
 	metadata, err := c.discoverServerMetadata(serverURL, cfg.resourceMetadataURL)
 	if err != nil {
@@ -192,17 +217,16 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		formData["code_verifier"] = c.codeVerifier
 	}
 
-	// Add client secret if available
-	if c.clientInfo.ClientSecret != "" {
-		formData["client_secret"] = c.clientInfo.ClientSecret
-	}
+	// Authenticate the request the way this client is registered to.
+	headers := make(map[string]string)
+	c.applyClientAuthentication(formData, headers)
 
 	// Create HTTP client and send request
 	client := httpclient.New(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := client.PostForm(ctx, c.serverMetadata.TokenEndpoint, formData, nil)
+	resp, err := client.PostForm(ctx, c.serverMetadata.TokenEndpoint, formData, headers)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
@@ -266,6 +290,146 @@ func (c *Coordinator) SaveTokens(tokens *Tokens) error {
 	})
 }
 
+// Client authentication methods for the token endpoint (RFC 7591 §2 /
+// RFC 6749 §2.3.1).
+const (
+	// authMethodNone is a public client: no secret, PKCE alone. This is what an
+	// installed CLI should be, so it is preferred wherever a server allows it.
+	authMethodNone = "none"
+
+	// authMethodSecretPost carries the credentials in the request body.
+	authMethodSecretPost = "client_secret_post"
+
+	// authMethodSecretBasic carries them in an Authorization header. RFC 8414
+	// makes it the default when a server publishes no list at all.
+	authMethodSecretBasic = "client_secret_basic"
+)
+
+// tokenEndpointAuthMethod picks how this client will authenticate at the token
+// endpoint, from the methods the authorization server says it accepts.
+//
+// Declaring "none" unconditionally is the same mistake as requesting a scope
+// nobody advertised: a server that does not offer it rejects the registration.
+// A public client is still preferred -- there is no secret to store and PKCE
+// already binds the exchange -- but only where the server allows it.
+func (c *Coordinator) tokenEndpointAuthMethod() string {
+	if c.serverMetadata == nil || len(c.serverMetadata.TokenEndpointAuthMethodsSupported) == 0 {
+		// Nothing published. "none" is what has always been sent here, and a
+		// server with no metadata to contradict it has nothing to reject.
+		return authMethodNone
+	}
+
+	for _, preferred := range []string{authMethodNone, authMethodSecretPost, authMethodSecretBasic} {
+		if containsTrimmed(c.serverMetadata.TokenEndpointAuthMethodsSupported, preferred) {
+			return preferred
+		}
+	}
+
+	// Only methods this client cannot perform (private_key_jwt and the like).
+	// Ask for the simplest one and let the server explain itself, which is more
+	// useful than failing before the request is made.
+	log.Printf("Authorization server accepts none of the supported client authentication methods (%v); requesting %s",
+		c.serverMetadata.TokenEndpointAuthMethodsSupported, authMethodNone)
+	return authMethodNone
+}
+
+// applyClientAuthentication authenticates the token request as the method
+// assigned to this client requires.
+//
+// The method comes from the registration response when the server stated one:
+// that is the server's own record of how this client must authenticate, which
+// outranks any preference of ours.
+func (c *Coordinator) applyClientAuthentication(formData map[string]string, headers map[string]string) {
+	method := c.clientInfo.TokenEndpointAuthMethod
+	if method == "" {
+		method = c.tokenEndpointAuthMethod()
+	}
+
+	if c.clientInfo.ClientSecret == "" {
+		// Nothing to authenticate with; client_id in the body identifies the
+		// client, as a public client does.
+		return
+	}
+
+	if method == authMethodSecretBasic {
+		// RFC 6749 §2.3.1: both parts are form-urlencoded before being joined
+		// and base64-encoded, and the id must not also appear in the body.
+		credentials := url.QueryEscape(c.clientInfo.ClientID) + ":" + url.QueryEscape(c.clientInfo.ClientSecret)
+		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
+		return
+	}
+
+	formData["client_secret"] = c.clientInfo.ClientSecret
+}
+
+// offlineAccessScope is the scope that asks for a refresh token. The proxy
+// outlives a single access token, so it is worth requesting -- but only where a
+// server says it exists.
+const offlineAccessScope = "offline_access"
+
+// requestedScope returns the value for the `scope` parameter of the
+// registration and authorization requests, or "" to send no scope at all.
+//
+// Every scope here is one a server advertised. Inventing one is not harmless:
+// an authorization server that does not recognise it rejects the whole request
+// with invalid_scope, which is how a hardcoded "mcp" -- a name no RFC or MCP
+// specification defines -- shut out every server using its own scope
+// vocabulary. When nothing advertises a scope, omitting the parameter lets the
+// authorization server apply its default, which is a request it can answer.
+func (c *Coordinator) requestedScope() string {
+	// A challenge names what this particular request was refused for, which is
+	// more specific than any published catalogue.
+	if c.challengeScope != "" {
+		return c.challengeScope
+	}
+	if c.serverMetadata == nil {
+		return ""
+	}
+
+	scopes := nonEmptyScopes(c.serverMetadata.ResourceScopesSupported)
+	if len(scopes) == 0 {
+		// The authorization server's own scopes_supported is deliberately not
+		// used as a fallback: it lists everything the server can issue for any
+		// resource, so asking for all of it would request far more than access
+		// to this MCP server needs.
+		return ""
+	}
+
+	// offline_access is not a resource scope, so a protected resource has no
+	// reason to list it; take it from the authorization server when offered.
+	if !containsTrimmed(scopes, offlineAccessScope) && containsTrimmed(c.serverMetadata.ScopesSupported, offlineAccessScope) {
+		scopes = append(scopes, offlineAccessScope)
+	}
+
+	return strings.Join(scopes, " ")
+}
+
+// normalizeScope collapses a scope string to single-space-separated tokens.
+func normalizeScope(scope string) string {
+	return strings.Join(strings.Fields(scope), " ")
+}
+
+// nonEmptyScopes copies scopes, dropping blank entries a server may have
+// published.
+func nonEmptyScopes(scopes []string) []string {
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func containsTrimmed(scopes []string, want string) bool {
+	for _, s := range scopes {
+		if strings.TrimSpace(s) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL string) (*ServerMetadata, error) {
 	// Skip cache when the caller supplied an explicit PRM URL: the cached
 	// entry may have come from a different (less authoritative) path.
@@ -325,14 +489,19 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 	regReq := map[string]interface{}{
 		"client_name":                "MCP Remote Go Client",
 		"redirect_uris":              []string{redirectURI},
-		"token_endpoint_auth_method": "none",
-		"scope":                      "mcp offline_access",
+		"token_endpoint_auth_method": c.tokenEndpointAuthMethod(),
 		"grant_types":                []string{"authorization_code"},
 		// A locally-installed CLI redirecting to loopback is a native client;
 		// declaring it lets the authorization server apply the right redirect
 		// URI rules instead of guessing (OpenID Connect Registration §2,
 		// required by the MCP authorization spec since 2026-07-28).
 		"application_type": "native",
+	}
+
+	// RFC 7591 §2: `scope` is optional, and omitting it leaves the scopes to
+	// the authorization server rather than claiming ones it may not know.
+	if scope := c.requestedScope(); scope != "" {
+		regReq["scope"] = scope
 	}
 
 	// Send registration request using httpclient
@@ -516,10 +685,15 @@ func (c *Coordinator) buildAuthorizationURL() (string, error) {
 	params.Set("client_id", c.clientInfo.ClientID)
 	params.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", c.callbackPort))
 	params.Set("response_type", "code")
-	params.Set("scope", "mcp offline_access")
 	params.Set("state", state)
 	params.Set("code_challenge", ComputeCodeChallenge(verifier))
 	params.Set("code_challenge_method", "S256")
+
+	// Omitted rather than guessed when no server advertised a scope; see
+	// requestedScope.
+	if scope := c.requestedScope(); scope != "" {
+		params.Set("scope", scope)
+	}
 
 	// RFC 8707 resource indicator (required by the MCP authorization spec).
 	if c.resource != "" {

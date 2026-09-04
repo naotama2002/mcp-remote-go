@@ -138,8 +138,10 @@ func TestOAuthFlowIntegration(t *testing.T) {
 	if !strings.Contains(authURL, "client_id=test-client-id") {
 		t.Errorf("Authorization URL should contain client_id: %s", authURL)
 	}
-	if !strings.Contains(authURL, "scope=mcp+offline_access") {
-		t.Errorf("Authorization URL should contain scope: %s", authURL)
+	// This mock publishes no Protected Resource Metadata, so nothing advertises
+	// a scope for the resource and the parameter is left out entirely.
+	if strings.Contains(authURL, "scope=") {
+		t.Errorf("Authorization URL should omit scope when none is advertised: %s", authURL)
 	}
 
 	// Test token exchange
