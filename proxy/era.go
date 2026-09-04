@@ -120,6 +120,15 @@ func probeBody() string {
 		`"io.modelcontextprotocol/clientCapabilities":{}}}}`
 }
 
+// legacyProbeBody is the request the fallback probe sends: a bare `ping`, which
+// every revision defines and which carries no per-request metadata. Its point is
+// that no server can reject it for being too new, so a rejection is about the
+// endpoint rather than about the request -- which is the question left open when
+// the modern probe comes back rejected.
+func legacyProbeBody() string {
+	return `{"jsonrpc":"2.0","method":"ping","id":0}`
+}
+
 // probeResponse is the parsed shape of a probe reply.
 type probeResponse struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -157,12 +166,12 @@ func probePayload(contentType string, body []byte) []byte {
 	return payload
 }
 
-// classifyProbe reads a probe reply and reports what it proves about the
-// server. isJSONRPC distinguishes a server that speaks the protocol from one
-// that merely returned a status code.
+// classifyProbe reads a reply to the modern server/discover probe and reports
+// what it proves about the server. isJSONRPC distinguishes a server that speaks
+// the protocol from one that merely returned a status code.
 func classifyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bool) {
-	var parsed probeResponse
-	if err := json.Unmarshal(body, &parsed); err != nil || parsed.JSONRPC == "" {
+	parsed, ok := parseProbeResponse(body)
+	if !ok {
 		return eraUnknown, nil, false
 	}
 
@@ -171,15 +180,53 @@ func classifyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bo
 		// Only a modern server answers server/discover with a result.
 		return eraModern, parsed.Result.SupportedVersions, true
 
-	case parsed.Error != nil && slices.Contains(modernErrorCodes, parsed.Error.Code):
-		if parsed.Error.Code == codeUnsupportedProtocolVersion && parsed.Error.Data != nil {
-			supported = parsed.Error.Data.Supported
-		}
-		return eraModern, supported, true
+	case modernError(parsed):
+		return eraModern, modernSupportedVersions(parsed), true
 
 	default:
 		// A JSON-RPC error that is not one of the modern codes: the server
 		// speaks the protocol over this endpoint but not this revision.
 		return eraLegacy, nil, true
 	}
+}
+
+// classifyLegacyProbe reads a reply to the `ping` fallback probe.
+//
+// The two probes need different readings of the same shapes. A result here is
+// not evidence of a modern server -- quite the opposite: the request carried no
+// per-request metadata, which a modern server rejects, so answering it happily
+// is what a legacy server does.
+func classifyLegacyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bool) {
+	parsed, ok := parseProbeResponse(body)
+	if !ok {
+		return eraUnknown, nil, false
+	}
+
+	if modernError(parsed) {
+		return eraModern, modernSupportedVersions(parsed), true
+	}
+	return eraLegacy, nil, true
+}
+
+func parseProbeResponse(body []byte) (probeResponse, bool) {
+	var parsed probeResponse
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.JSONRPC == "" {
+		return probeResponse{}, false
+	}
+	return parsed, true
+}
+
+// modernError reports whether the reply carries an error only a modern server
+// produces.
+func modernError(parsed probeResponse) bool {
+	return parsed.Error != nil && slices.Contains(modernErrorCodes, parsed.Error.Code)
+}
+
+// modernSupportedVersions returns the version list an
+// UnsupportedProtocolVersionError carries, if any.
+func modernSupportedVersions(parsed probeResponse) []string {
+	if parsed.Error != nil && parsed.Error.Code == codeUnsupportedProtocolVersion && parsed.Error.Data != nil {
+		return parsed.Error.Data.Supported
+	}
+	return nil
 }

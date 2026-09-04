@@ -265,72 +265,120 @@ func (p *Proxy) negotiateTransport() error {
 	return p.connectWithMode(profile.transport)
 }
 
-// probeServer sends the era probe and classifies the reply.
+// probeServer settles the transport and, where it can, the era.
+//
+// The modern probe asks a question only a 2026-07-28 server can answer, so its
+// rejection is ambiguous: it may mean "wrong transport" or merely "I do not
+// speak that revision". Nothing in a plain-text rejection separates the two,
+// and guessing either way strands real servers -- guessing SSE breaks legacy
+// Streamable HTTP endpoints, guessing Streamable HTTP breaks endpoints that
+// host only the deprecated transport. So when the answer is ambiguous the
+// question is asked again in a shape every revision understands, and that reply
+// decides the transport.
 func (p *Proxy) probeServer() (serverProfile, error) {
-	probeReq, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(probeBody()))
+	modern, err := p.sendProbe(probeBody(), map[string]string{
+		HeaderMCPProtocolVersion: ProtocolVersion20260728,
+		HeaderMCPMethod:          "server/discover",
+	}, classifyProbe)
 	if err != nil {
-		return serverProfile{}, fmt.Errorf("failed to create probe request: %w", err)
+		return serverProfile{}, err
+	}
+
+	switch {
+	case modern.status == http.StatusOK || modern.status == http.StatusAccepted:
+		log.Println("Server supports Streamable HTTP transport")
+		return serverProfile{transport: TransportModeStreamableHTTP, era: modern.era, supportedVersions: modern.supported}, nil
+
+	case modern.isJSONRPC:
+		// A JSON-RPC body means the server speaks the protocol on this
+		// endpoint even though it rejected this particular request, so the
+		// endpoint is a Streamable HTTP one regardless of the status.
+		log.Printf("Server returned %d with a JSON-RPC body, using Streamable HTTP transport", modern.status)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: modern.era, supportedVersions: modern.supported}, nil
+
+	case modern.status == http.StatusNotFound || modern.status == http.StatusMethodNotAllowed:
+		// Nothing here answers POST at all: the signature of a server hosting
+		// only the deprecated transport, whose POST endpoint is another URL.
+		log.Printf("Server returned %d without a JSON-RPC body, falling back to SSE transport", modern.status)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+	}
+
+	// Ambiguous. Ask in a pre-2026-07-28 shape, which any Streamable HTTP
+	// endpoint answers and a deprecated-transport endpoint still refuses.
+	log.Printf("Server returned %d without a JSON-RPC body; re-probing with a pre-%s request",
+		modern.status, ProtocolVersion20260728)
+
+	legacy, err := p.sendProbe(legacyProbeBody(), map[string]string{
+		HeaderMCPProtocolVersion: MCPProtocolVersion,
+	}, classifyLegacyProbe)
+	if err != nil {
+		var unauth *UnauthorizedError
+		if errors.As(err, &unauth) {
+			return serverProfile{}, err
+		}
+		log.Printf("Legacy probe failed: %v, falling back to SSE transport", err)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+	}
+
+	switch {
+	case legacy.status == http.StatusOK || legacy.status == http.StatusAccepted || legacy.isJSONRPC:
+		log.Printf("Server answered the pre-%s probe with %d, using Streamable HTTP transport",
+			ProtocolVersion20260728, legacy.status)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: legacy.era, supportedVersions: legacy.supported}, nil
+
+	default:
+		// Neither shape of JSON-RPC request was answered on this endpoint, so
+		// it is not a Streamable HTTP one.
+		log.Printf("Server rejected the pre-%s probe with %d as well, falling back to SSE transport",
+			ProtocolVersion20260728, legacy.status)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+	}
+}
+
+// probeOutcome is what a single probe request revealed.
+type probeOutcome struct {
+	status    int
+	era       serverEra
+	supported []string
+	isJSONRPC bool
+}
+
+// sendProbe POSTs one probe body and classifies the reply with the classifier
+// matching the shape of the request that was sent.
+func (p *Proxy) sendProbe(body string, headers map[string]string, classify func([]byte) (serverEra, []string, bool)) (probeOutcome, error) {
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(body))
+	if err != nil {
+		return probeOutcome{}, fmt.Errorf("failed to create probe request: %w", err)
 	}
 
 	for k, v := range p.headers {
-		probeReq.Header.Set(k, v)
+		req.Header.Set(k, v)
 	}
 	if token := p.getAuthToken(); token != "" {
-		probeReq.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	probeReq.Header.Set("Content-Type", "application/json")
-	probeReq.Header.Set("Accept", "application/json, text/event-stream")
-	probeReq.Header.Set(HeaderMCPProtocolVersion, ProtocolVersion20260728)
-	probeReq.Header.Set(HeaderMCPMethod, "server/discover")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
-	resp, err := p.client.Do(probeReq)
+	resp, err := p.client.Do(req)
 	if err != nil {
-		return serverProfile{}, fmt.Errorf("streamable HTTP probe failed: %w", err)
+		return probeOutcome{}, fmt.Errorf("streamable HTTP probe failed: %w", err)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return serverProfile{}, unauthorizedFromResponse(resp)
+		return probeOutcome{}, unauthorizedFromResponse(resp)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
+	payload, _ := io.ReadAll(resp.Body)
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	era, supported, isJSONRPC := classifyProbe(probePayload(resp.Header.Get("Content-Type"), body))
-
-	switch {
-	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
-		log.Println("Server supports Streamable HTTP transport")
-		return serverProfile{transport: TransportModeStreamableHTTP, era: era, supportedVersions: supported}, nil
-
-	case isJSONRPC:
-		// A JSON-RPC body means the server speaks the protocol on this
-		// endpoint even though it rejected this particular request, so the
-		// endpoint is a Streamable HTTP one regardless of the status.
-		log.Printf("Server returned %d with a JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
-		return serverProfile{transport: TransportModeStreamableHTTP, era: era, supportedVersions: supported}, nil
-
-	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
-		// Nothing here answers POST, and no JSON-RPC error says otherwise:
-		// the signature of a server hosting only the deprecated transport,
-		// whose POST endpoint is a different URL.
-		log.Printf("Server returned %d without a JSON-RPC body, falling back to SSE transport", resp.StatusCode)
-		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
-
-	default:
-		// The endpoint took the POST and rejected what was in it. That places
-		// it as a Streamable HTTP endpoint on a revision older than the one
-		// the probe asked for -- servers that predate server/discover reject
-		// it however they like, plain text included.
-		//
-		// Reading this as "not Streamable HTTP" sent such servers to the
-		// deprecated transport, where the opening GET fails on a missing
-		// session id and the connection is lost for good.
-		log.Printf("Server returned %d without a JSON-RPC body; it does not implement server/discover, "+
-			"so using Streamable HTTP with the revision the client asks for", resp.StatusCode)
-		return serverProfile{transport: TransportModeStreamableHTTP, era: eraLegacy}, nil
-	}
+	era, supported, isJSONRPC := classify(probePayload(resp.Header.Get("Content-Type"), payload))
+	return probeOutcome{status: resp.StatusCode, era: era, supported: supported, isJSONRPC: isJSONRPC}, nil
 }
 
 // connectWithMode connects using a specific transport mode.

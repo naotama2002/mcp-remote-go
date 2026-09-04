@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -191,17 +192,22 @@ func TestNegotiateDetectsModernOnlyServer(t *testing.T) {
 
 // TestNegotiateKeepsStreamableHTTPOnPlainTextRejection covers the server that
 // exposed this: a Streamable HTTP endpoint on a revision that predates
-// server/discover, which rejects the probe with a plain-text 400 rather than a
-// JSON-RPC error.
+// server/discover, which rejects the modern probe with a plain-text 400 rather
+// than a JSON-RPC error.
 //
 // Reading that as "not Streamable HTTP" sent it to the deprecated transport,
-// where the opening GET is answered "GET requires an Mcp-Session-Id header"
-// and the connection is lost. The endpoint took the POST; that is what places
-// it.
+// where the opening GET is answered "GET requires an Mcp-Session-Id header" and
+// the connection is lost. What places it is that it answers a request from its
+// own era, which is what the fallback probe asks.
 func TestNegotiateKeepsStreamableHTTPOnPlainTextRejection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
+			if probeMethod(t, r) == "ping" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"jsonrpc":"2.0","id":0,"result":{}}`)
+				return
+			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprint(w, "Bad Request: unknown method")
@@ -229,6 +235,71 @@ func TestNegotiateKeepsStreamableHTTPOnPlainTextRejection(t *testing.T) {
 	if got := proxy.currentProfile().era; got != eraLegacy {
 		t.Errorf("era = %v, want legacy", got)
 	}
+}
+
+// TestNegotiateFallsBackToSSEWhenNoJSONRPCIsServed is the other half of the
+// same rule, and a regression guard for real breakage: a server hosting only
+// the deprecated transport, whose POST endpoint answers a plain-text 400 rather
+// than 404 or 405 -- the shape an SDK server produces when the POST handler
+// wants a sessionId query parameter.
+//
+// Treating any rejection as proof of a Streamable HTTP endpoint sent this server
+// to the wrong transport, and every message the client sent failed. The endpoint
+// refusing a request from its own era is what rules it out.
+func TestNegotiateFallsBackToSSEWhenNoJSONRPCIsServed(t *testing.T) {
+	var postBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			postBodies = append(postBodies, probeMethod(t, r))
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, "Missing sessionId")
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "event: endpoint\ndata: /message\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+
+	proxy, err := NewProxyWithTransport(server.URL, 0, map[string]string{}, "sse-only-400-test", TransportModeAuto)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	if err := proxy.connectToServer(); err != nil {
+		t.Fatalf("connectToServer failed: %v", err)
+	}
+
+	if got := proxy.currentTransportMode(); got != TransportModeSSE {
+		t.Errorf("transport = %q, want sse", got)
+	}
+	// Both shapes must have been tried before ruling the endpoint out.
+	if len(postBodies) != 2 || postBodies[0] != "server/discover" || postBodies[1] != "ping" {
+		t.Errorf("probe methods = %v, want [server/discover ping]", postBodies)
+	}
+}
+
+// probeMethod returns the JSON-RPC method of a probe request body.
+func probeMethod(t *testing.T, r *http.Request) string {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("failed to read probe body: %v", err)
+		return ""
+	}
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Errorf("probe body is not JSON: %v", err)
+		return ""
+	}
+	return envelope.Method
 }
 
 // TestNegotiateFallsBackToSSEOnlyWhenPostIsUnserved pins the other side of the
