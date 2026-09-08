@@ -13,11 +13,36 @@ MCP Remote proxies between:
 - **Streamable HTTP transport** (MCP 2025-11-25) - Single-endpoint POST/GET with session management
 - **Legacy SSE transport** (MCP 2024-11-05) - Traditional two-endpoint SSE connection
 - **Auto-negotiation** - Automatically detects server capabilities and selects the optimal transport
+- **Request metadata headers** (MCP 2026-07-28) - `Mcp-Method` and `Mcp-Name` are derived from each message, with the base64 sentinel encoding for values that are not header-safe
+- **`x-mcp-header` mirroring** (SEP-2243) - Tool arguments a server designates are copied into `Mcp-Param-*` headers, and tools with malformed annotations are withheld from `tools/list`
+- **Stream-close cancellation** (MCP 2026-07-28) - A `notifications/cancelled` from a modern client closes that request's response stream, which is what the revision defines as the cancellation signal
 - **OAuth 2.1 with PKCE** (RFC 7636) - Secure authorization with S256 code challenge
+- **Automatic token renewal** (RFC 6749 §6) - An access token nearing expiry is exchanged for a fresh one before it is used, and again if a server refuses one, so a long-running session outlives its tokens without sending anyone back to a browser
+- **Server-advertised scopes and client authentication** - `scope` is taken from the `WWW-Authenticate` challenge (RFC 6750 §3.1) or the protected resource's own `scopes_supported` (RFC 9728 §2), and the token endpoint authentication method from the server's published list, rather than from values the client picks for itself
+- **One authorization at a time** - Concurrent proxies for the same server coordinate through a lock, so a second instance waits for the first one's token instead of opening a second browser window for the same account
+- **CSRF-protected callback** - `state` binds each authorization request to its callback, and the issuer is validated per RFC 9207 to prevent mix-up attacks
 - **Protected Resource Metadata** (RFC 9728) - Discover authorization servers from resource endpoints, including `WWW-Authenticate`-driven discovery on 401 responses (§5.1)
 - **Resource Indicators** (RFC 8707) - The MCP server's canonical URI is sent as `resource` on both authorization and token requests
 - **OAuth Discovery** (RFC 8414) and OpenID Connect Discovery
 - **Custom headers** and HTTPS enforcement
+
+### Protocol revision support
+
+The proxy forwards whichever revision the local MCP client speaks; it never
+picks one on the client's behalf. A client on 2025-11-25 or earlier is
+forwarded through the `initialize` handshake as before, and a client on
+2026-07-28 has its per-request `_meta` mirrored into the routing headers that
+revision requires.
+
+Both sides must therefore be on the same side of the 2026-07-28 line. Every
+combination works except one: a client older than 2026-07-28 talking to a
+server that has dropped the `initialize` handshake entirely. The spec gives
+such a client no way to negotiate forward, so only a translating proxy could
+connect them — deliberately out of scope here. The proxy detects the case
+during auto-negotiation and says so at startup rather than letting it surface
+as an error on the first tool call.
+
+See `test/conformance` for what is verified against the official MCP SDK.
 
 ## Installation
 
@@ -128,6 +153,14 @@ docker run --rm -it -p 3334:3334 -v ~/.mcp-remote-go-auth:/home/appuser/.mcp-rem
 ## Configuration for MCP Clients
 
 By default, `mcp-remote-go` auto-detects the transport (Streamable HTTP or SSE). You can force a specific transport with the `--transport` flag.
+
+Detection sends a `server/discover` request and reads the reply. A server that
+answers it is on 2026-07-28 or later, and the answer also names every revision
+it supports; a server that rejects it in JSON-RPC is on an earlier revision but
+still speaks Streamable HTTP; a server that does not answer POST at all is
+served over the deprecated SSE transport. If the server turns out to have
+dropped the `initialize` handshake entirely, the proxy logs a warning at
+startup, because an MCP client older than 2026-07-28 has no way to reach it.
 
 ### Claude Desktop (MCPB Extension)
 

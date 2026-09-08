@@ -138,8 +138,10 @@ func TestOAuthFlowIntegration(t *testing.T) {
 	if !strings.Contains(authURL, "client_id=test-client-id") {
 		t.Errorf("Authorization URL should contain client_id: %s", authURL)
 	}
-	if !strings.Contains(authURL, "scope=mcp+offline_access") {
-		t.Errorf("Authorization URL should contain scope: %s", authURL)
+	// This mock publishes no Protected Resource Metadata, so nothing advertises
+	// a scope for the resource and the parameter is left out entirely.
+	if strings.Contains(authURL, "scope=") {
+		t.Errorf("Authorization URL should omit scope when none is advertised: %s", authURL)
 	}
 
 	// Test token exchange
@@ -441,8 +443,8 @@ func TestCallbackServerLifecycle(t *testing.T) {
 	// Simulate an auth flow by creating a goroutine that will read from the callback channel
 	go func() {
 		select {
-		case code := <-coordinator.callbackChan:
-			t.Logf("Received auth code: %s", code)
+		case result := <-coordinator.callbackChan:
+			t.Logf("Received callback result: code=%q err=%v", result.code, result.err)
 		case <-time.After(500 * time.Millisecond):
 			// Timeout is expected for this test
 		}
