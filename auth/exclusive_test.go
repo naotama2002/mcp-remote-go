@@ -9,6 +9,12 @@ import (
 	"github.com/naotama2002/mcp-remote-go/internal/filelock"
 )
 
+// newFileLockFor returns a lock on the same authorization lock file another
+// process would contend for.
+func newFileLockFor(c *Coordinator) *filelock.FileLock {
+	return filelock.New(c.getAuthLockPath())
+}
+
 // newTestCoordinator returns a coordinator with its own config directory.
 func newTestCoordinator(t *testing.T, hash string) *Coordinator {
 	t.Helper()

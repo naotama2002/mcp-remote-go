@@ -48,8 +48,11 @@ type Proxy struct {
 	stdioWriter   *bufio.Writer
 	// stdin is the client's messages, read from startup so that the pipe
 	// closing is noticed even while an authorization flow is in progress.
-	stdin    *stdinQueue
-	writerMu sync.Mutex
+	stdin *stdinQueue
+	// renewalTried guards against renewing an access token in a loop; see
+	// mayRenew.
+	renewalTried bool
+	writerMu     sync.Mutex
 	// stateMu guards transport, transportMode and serverProfile. Reconnection
 	// runs on the transport's error callback goroutine and replaces all three
 	// while the stdio reader is using them.
@@ -84,6 +87,35 @@ func (p *Proxy) setActiveTransport(t Transport, mode TransportMode) {
 	defer p.stateMu.Unlock()
 	p.transport = t
 	p.transportMode = mode
+	// A connection stands, so whatever token it was made with was accepted.
+	// The next refusal is a new question, and renewal is on the table again.
+	p.renewalTried = false
+}
+
+// markRenewed records that the access token has just been renewed, so a refusal
+// of the renewed token is not answered by renewing again.
+func (p *Proxy) markRenewed() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.renewalTried = true
+}
+
+// mayRenew reports whether renewing the access token is still worth trying, and
+// records the attempt.
+//
+// A 401 that arrives on a token this process just renewed is not about the
+// token's age, and renewing again would loop between the server and the token
+// endpoint without the user ever being asked to authorize. One attempt per
+// connection is enough: setActiveTransport clears this once a token has been
+// accepted.
+func (p *Proxy) mayRenew() bool {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if p.renewalTried {
+		return false
+	}
+	p.renewalTried = true
+	return true
 }
 
 // setProfile records the result of auto-negotiation.
@@ -198,13 +230,36 @@ func (p *Proxy) Shutdown() {
 	p.wg.Wait()
 }
 
-// getAuthToken returns the current auth token if available.
+// getAuthToken returns the token to present to the server, renewing it first
+// when it is about to expire.
+//
+// Renewing here rather than after the server refuses the request costs the same
+// single round trip and spares the failed request, the reconnection behind it,
+// and -- for a token whose refresh has itself expired -- lets the browser flow
+// start before the user is mid-request.
 func (p *Proxy) getAuthToken() string {
 	tokens, err := p.authCoord.LoadTokens()
-	if err == nil && tokens.AccessToken != "" {
+	if err != nil || tokens.AccessToken == "" {
+		return ""
+	}
+	if !tokens.DueForRenewal() {
 		return tokens.AccessToken
 	}
-	return ""
+
+	renewed, err := p.authCoord.RenewExclusively(p.ctx, p.serverURL)
+	if err != nil {
+		if !errors.Is(err, auth.ErrNoRefreshToken) {
+			log.Printf("Could not renew the expiring access token: %v", err)
+		}
+		// Present what we have. The server is the authority on whether it is
+		// still good, and its refusal is handled where every other one is.
+		return tokens.AccessToken
+	}
+
+	// If the renewed token is refused as well, age was not the problem, and
+	// renewing a second time on its 401 would only delay asking the user.
+	p.markRenewed()
+	return renewed.AccessToken
 }
 
 // connectToServer establishes a connection using the configured transport
@@ -477,7 +532,23 @@ func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 		}
 	}
 
+	mayRenew := p.mayRenew()
+
 	err := p.authCoord.AuthorizeExclusively(p.ctx, func() error {
+		// A 401 often means nothing more than an access token that aged out.
+		// Renewing costs one request and no user interaction, so it is tried
+		// before a browser window is put in front of anyone.
+		if mayRenew {
+			switch _, err := p.authCoord.Renew(p.ctx, p.serverURL); {
+			case err == nil:
+				log.Println("Renewed the access token; no authorization needed")
+				return nil
+			case errors.Is(err, auth.ErrNoRefreshToken):
+				// Nothing stored to renew with, which is ordinary.
+			default:
+				log.Printf("Could not renew the access token, authorizing instead: %v", err)
+			}
+		}
 		return p.authorize(initOpts)
 	})
 	if err != nil {

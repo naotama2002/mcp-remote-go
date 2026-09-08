@@ -26,6 +26,14 @@ type Tokens struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresIn    int    `json:"expires_in,omitempty"`
 	TokenType    string `json:"token_type,omitempty"`
+	// ExpiresAt is when the access token stops being accepted, in Unix
+	// seconds. expires_in is a lifetime measured from issuance, which says
+	// nothing on its own once the token has been sitting in a file across
+	// restarts, so the absolute instant is recorded when the token arrives and
+	// is what later reads compare against. Tokens stored before this field
+	// existed simply have no expiry to act on, and are renewed when the server
+	// rejects them instead.
+	ExpiresAt int64 `json:"expires_at,omitempty"`
 }
 
 // ClientInfo holds the OAuth client registration information
@@ -207,7 +215,7 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 
 	// Prepare form data for token request
 	formData := map[string]string{
-		"grant_type":   "authorization_code",
+		"grant_type":   grantTypeAuthorizationCode,
 		"code":         code,
 		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
 		"client_id":    c.clientInfo.ClientID,
@@ -225,7 +233,7 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 
 	// Authenticate the request the way this client is registered to.
 	headers := make(map[string]string)
-	c.applyClientAuthentication(formData, headers)
+	c.applyClientAuthentication(c.clientInfo, formData, headers)
 
 	// Create HTTP client and send request
 	client := httpclient.New(nil)
@@ -244,6 +252,7 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
+	tokens.stampExpiry(time.Now())
 	return &tokens, nil
 }
 
@@ -345,13 +354,13 @@ func (c *Coordinator) tokenEndpointAuthMethod() string {
 // The method comes from the registration response when the server stated one:
 // that is the server's own record of how this client must authenticate, which
 // outranks any preference of ours.
-func (c *Coordinator) applyClientAuthentication(formData map[string]string, headers map[string]string) {
-	method := c.clientInfo.TokenEndpointAuthMethod
+func (c *Coordinator) applyClientAuthentication(clientInfo *ClientInfo, formData map[string]string, headers map[string]string) {
+	method := clientInfo.TokenEndpointAuthMethod
 	if method == "" {
 		method = c.tokenEndpointAuthMethod()
 	}
 
-	if c.clientInfo.ClientSecret == "" {
+	if clientInfo.ClientSecret == "" {
 		// Nothing to authenticate with; client_id in the body identifies the
 		// client, as a public client does.
 		return
@@ -360,12 +369,12 @@ func (c *Coordinator) applyClientAuthentication(formData map[string]string, head
 	if method == authMethodSecretBasic {
 		// RFC 6749 §2.3.1: both parts are form-urlencoded before being joined
 		// and base64-encoded, and the id must not also appear in the body.
-		credentials := url.QueryEscape(c.clientInfo.ClientID) + ":" + url.QueryEscape(c.clientInfo.ClientSecret)
+		credentials := url.QueryEscape(clientInfo.ClientID) + ":" + url.QueryEscape(clientInfo.ClientSecret)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
 		return
 	}
 
-	formData["client_secret"] = c.clientInfo.ClientSecret
+	formData["client_secret"] = clientInfo.ClientSecret
 }
 
 // offlineAccessScope is the scope that asks for a refresh token. The proxy
@@ -496,7 +505,7 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 		"client_name":                "MCP Remote Go Client",
 		"redirect_uris":              []string{redirectURI},
 		"token_endpoint_auth_method": c.tokenEndpointAuthMethod(),
-		"grant_types":                []string{"authorization_code"},
+		"grant_types":                c.grantTypes(),
 		// A locally-installed CLI redirecting to loopback is a native client;
 		// declaring it lets the authorization server apply the right redirect
 		// URI rules instead of guessing (OpenID Connect Registration §2,
