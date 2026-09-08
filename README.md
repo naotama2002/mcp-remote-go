@@ -17,6 +17,9 @@ MCP Remote proxies between:
 - **`x-mcp-header` mirroring** (SEP-2243) - Tool arguments a server designates are copied into `Mcp-Param-*` headers, and tools with malformed annotations are withheld from `tools/list`
 - **Stream-close cancellation** (MCP 2026-07-28) - A `notifications/cancelled` from a modern client closes that request's response stream, which is what the revision defines as the cancellation signal
 - **OAuth 2.1 with PKCE** (RFC 7636) - Secure authorization with S256 code challenge
+- **Automatic token renewal** (RFC 6749 §6) - An access token nearing expiry is exchanged for a fresh one before it is used, and again if a server refuses one, so a long-running session outlives its tokens without sending anyone back to a browser
+- **Server-advertised scopes and client authentication** - `scope` is taken from the `WWW-Authenticate` challenge (RFC 6750 §3.1) or the protected resource's own `scopes_supported` (RFC 9728 §2), and the token endpoint authentication method from the server's published list, rather than from values the client picks for itself
+- **One authorization at a time** - Concurrent proxies for the same server coordinate through a lock, so a second instance waits for the first one's token instead of opening a second browser window for the same account
 - **CSRF-protected callback** - `state` binds each authorization request to its callback, and the issuer is validated per RFC 9207 to prevent mix-up attacks
 - **Protected Resource Metadata** (RFC 9728) - Discover authorization servers from resource endpoints, including `WWW-Authenticate`-driven discovery on 401 responses (§5.1)
 - **Resource Indicators** (RFC 8707) - The MCP server's canonical URI is sent as `resource` on both authorization and token requests
