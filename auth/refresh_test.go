@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -275,35 +274,60 @@ func TestRenewReportsARejectedRefreshToken(t *testing.T) {
 	}
 }
 
-// TestRenewExclusivelyUsesAnotherProcessResult covers two proxies renewing at
-// once. Refresh tokens are commonly single-use, so the second must take the
-// first one's result rather than spend a token the server has already retired.
-func TestRenewExclusivelyUsesAnotherProcessResult(t *testing.T) {
+// TestRenewIfUncontestedLeavesAnotherProcessToIt covers two proxies renewing at
+// once. Refresh tokens are commonly single-use, so the second must not spend
+// the same one -- and on the request path it does not wait to find out how the
+// first got on: it keeps the token it has and lets the server judge it.
+func TestRenewIfUncontestedLeavesAnotherProcessToIt(t *testing.T) {
 	rs := newRenewTestServer(t, true, "")
-	c := seedStoredAuthorization(t, "renew-exclusive", rs,
-		&ClientInfo{ClientID: "c", TokenEndpointAuthMethod: authMethodNone},
-		&Tokens{AccessToken: "old", RefreshToken: "single-use"})
+	stored := &Tokens{AccessToken: "old", RefreshToken: "single-use"}
+	c := seedStoredAuthorization(t, "renew-contested", rs,
+		&ClientInfo{ClientID: "c", TokenEndpointAuthMethod: authMethodNone}, stored)
 
-	// Stand in for the other process: hold the lock, then store its result.
+	// Stand in for the other process, holding the lock throughout.
 	other := newFileLockFor(c)
 	if err := other.Lock(time.Second); err != nil {
 		t.Fatalf("failed to take the lock as the other process: %v", err)
 	}
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		_ = c.SaveTokens(&Tokens{AccessToken: "other-process-access", RefreshToken: "other-process-refresh"})
-		_ = other.Unlock()
-	}()
+	defer func() { _ = other.Unlock() }()
 
-	renewed, err := c.RenewExclusively(context.Background(), "https://mcp.example.com/mcp")
+	start := time.Now()
+	_, err := c.RenewIfUncontested(context.Background(), "https://mcp.example.com/mcp", stored)
+
+	if !errors.Is(err, ErrRenewalBusy) {
+		t.Errorf("error = %v, want ErrRenewalBusy", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waited %v on the request path for another process's lock", elapsed)
+	}
+	if form, _ := rs.form.Load().(url.Values); form.Get("refresh_token") != "" {
+		t.Error("the single-use refresh token was spent while another process held the lock")
+	}
+}
+
+// TestRenewIfUncontestedTakesAnAlreadyRenewedToken covers the other process
+// having finished just before this one took the lock: its token is the answer,
+// and spending the refresh token again would retire a live one for nothing.
+func TestRenewIfUncontestedTakesAnAlreadyRenewedToken(t *testing.T) {
+	rs := newRenewTestServer(t, true, "")
+	stale := &Tokens{AccessToken: "old", RefreshToken: "single-use"}
+	c := seedStoredAuthorization(t, "renew-already-done", rs,
+		&ClientInfo{ClientID: "c", TokenEndpointAuthMethod: authMethodNone}, stale)
+
+	// What the other process left behind before releasing the lock.
+	if err := c.SaveTokens(&Tokens{AccessToken: "other-process-access", RefreshToken: "other-process-refresh"}); err != nil {
+		t.Fatalf("SaveTokens failed: %v", err)
+	}
+
+	renewed, err := c.RenewIfUncontested(context.Background(), "https://mcp.example.com/mcp", stale)
 	if err != nil {
-		t.Fatalf("RenewExclusively failed: %v", err)
+		t.Fatalf("RenewIfUncontested failed: %v", err)
 	}
 	if renewed.AccessToken != "other-process-access" {
 		t.Errorf("access token = %q, want the other process's result", renewed.AccessToken)
 	}
 	if form, _ := rs.form.Load().(url.Values); form.Get("refresh_token") != "" {
-		t.Error("the single-use refresh token was spent a second time")
+		t.Error("renewed even though a newer token was already stored")
 	}
 }
 
@@ -364,21 +388,11 @@ func TestExchangeCodeRecordsTheExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	c, err := NewCoordinator("exchange-expiry", 0)
-	if err != nil {
-		t.Fatalf("NewCoordinator failed: %v", err)
-	}
+	c := newTestCoordinator(t, "exchange-expiry")
 	c.serverMetadata = &ServerMetadata{Issuer: server.URL, TokenEndpoint: server.URL + "/token"}
 	c.clientInfo = &ClientInfo{ClientID: "c", TokenEndpointAuthMethod: authMethodNone}
 
-	tokens, err := c.ExchangeCode("code")
+	tokens, err := c.ExchangeCode(context.Background(), "code")
 	if err != nil {
 		t.Fatalf("ExchangeCode failed: %v", err)
 	}

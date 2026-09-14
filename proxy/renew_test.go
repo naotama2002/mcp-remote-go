@@ -2,14 +2,14 @@ package proxy
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naotama2002/mcp-remote-go/auth"
 )
 
 // seedAuthCache writes the files an earlier authorization would have left on
@@ -19,14 +19,7 @@ import (
 func seedAuthCache(t *testing.T, hash, tokenEndpoint string, tokens map[string]any) {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
-
-	dir := filepath.Join(tmpDir, ".mcp-remote-go-auth", hash)
+	dir := filepath.Join(seedHome(t), ".mcp-remote-go-auth", hash)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatalf("failed to create the auth directory: %v", err)
 	}
@@ -53,20 +46,29 @@ func seedAuthCache(t *testing.T, hash, tokenEndpoint string, tokens map[string]a
 	write("tokens.json", tokens)
 }
 
-// readStoredAccessToken returns the access token currently on disk.
+// readStoredAccessToken returns the access token currently on disk, through the
+// same API the proxy reads it with.
 func readStoredAccessToken(t *testing.T, hash string) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".mcp-remote-go-auth", hash, "tokens.json"))
+	coordinator, err := auth.NewCoordinator(hash, 0)
+	if err != nil {
+		t.Fatalf("failed to open the auth store: %v", err)
+	}
+	tokens, err := coordinator.LoadTokens()
 	if err != nil {
 		t.Fatalf("failed to read the stored tokens: %v", err)
 	}
-	var tokens struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.Unmarshal(data, &tokens); err != nil {
-		t.Fatalf("failed to parse the stored tokens: %v", err)
-	}
 	return tokens.AccessToken
+}
+
+// seedHome points the auth store at a directory of this test's own, and returns
+// it. Seeding writes the cache files directly because the functions that write
+// metadata and client registrations are not exported.
+func seedHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
 }
 
 // TestRenewsOn401WithoutAskingTheUser is the point of the feature: an access
@@ -75,53 +77,25 @@ func readStoredAccessToken(t *testing.T, hash string) string {
 func TestRenewsOn401WithoutAskingTheUser(t *testing.T) {
 	var renewals int64
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/token":
-			atomic.AddInt64(&renewals, 1)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"access_token":  "renewed-access",
-				"refresh_token": "rotated-refresh",
-				"token_type":    "Bearer",
-				"expires_in":    3600,
-			})
+	server := newOAuthMockServer(t, "renewed-access", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&renewals, 1)
+		writeJSONBody(w, map[string]any{
+			"access_token":  "renewed-access",
+			"refresh_token": "rotated-refresh",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	})
 
-		case "/mcp":
-			// Only the renewed token is accepted, so connecting at all proves
-			// the renewal happened and was used.
-			if r.Header.Get("Authorization") != "Bearer renewed-access" {
-				w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"jsonrpc":"2.0","id":0,"result":{}}`)
-
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	// No recorded expiry, which is what a token stored before this proxy knew
-	// to record one looks like. Nothing can be renewed ahead of time, so the
-	// server's refusal is what has to trigger it.
 	const hash = "renew-on-401"
 	seedAuthCache(t, hash, server.URL+"/token", map[string]any{
 		"access_token":  "expired-access",
 		"refresh_token": "stored-refresh",
 	})
 
-	opened := make([]string, 0, 1)
-	originalOpen := openBrowserFunc
-	defer func() { openBrowserFunc = originalOpen }()
-	openBrowserFunc = func(rawURL string) error {
-		opened = append(opened, rawURL)
-		return nil
-	}
+	opened := captureBrowserOpens(t, nil)
 
-	proxy, err := NewProxyWithTransport(server.URL+"/mcp", 0, map[string]string{}, hash, TransportModeAuto)
+	proxy, err := NewProxyWithTransport(server.MCPURL(), 0, map[string]string{}, hash, TransportModeAuto)
 	if err != nil {
 		t.Fatalf("failed to create the proxy: %v", err)
 	}
@@ -131,8 +105,8 @@ func TestRenewsOn401WithoutAskingTheUser(t *testing.T) {
 		t.Fatalf("connectToServer failed: %v", err)
 	}
 
-	if len(opened) != 0 {
-		t.Errorf("opened a browser window for a token that only needed renewing: %v", opened)
+	if got := opened(); len(got) != 0 {
+		t.Errorf("opened a browser window for a token that only needed renewing: %v", got)
 	}
 	if got := atomic.LoadInt64(&renewals); got != 1 {
 		t.Errorf("token endpoint was called %d times, want 1", got)
@@ -149,52 +123,14 @@ func TestRenewsOn401WithoutAskingTheUser(t *testing.T) {
 func TestStopsRenewingWhenTheServerStillRefuses(t *testing.T) {
 	var renewals int64
 
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/token":
-			atomic.AddInt64(&renewals, 1)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"access_token": "renewed-but-still-refused",
-				"token_type":   "Bearer",
-				"expires_in":   3600,
-			})
-
-		case "/mcp":
-			// Refuses everything, however new.
-			w.Header().Set("WWW-Authenticate",
-				fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, server.URL))
-			w.WriteHeader(http.StatusUnauthorized)
-
-		case "/.well-known/oauth-protected-resource":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"resource":              server.URL + "/mcp",
-				"authorization_servers": []string{server.URL},
-			})
-
-		case "/.well-known/oauth-authorization-server":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"issuer":                 server.URL,
-				"authorization_endpoint": server.URL + "/auth",
-				"token_endpoint":         server.URL + "/token",
-				"registration_endpoint":  server.URL + "/register",
-			})
-
-		case "/register":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"client_id":                  "reregistered",
-				"token_endpoint_auth_method": "none",
-			})
-
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	server := newOAuthMockServer(t, "", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&renewals, 1)
+		writeJSONBody(w, map[string]any{
+			"access_token": "renewed-but-still-refused",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	})
 
 	const hash = "renew-then-refused"
 	seedAuthCache(t, hash, server.URL+"/token", map[string]any{
@@ -202,7 +138,7 @@ func TestStopsRenewingWhenTheServerStillRefuses(t *testing.T) {
 		"refresh_token": "stored-refresh",
 	})
 
-	proxy, err := NewProxyWithTransport(server.URL+"/mcp", 0, map[string]string{}, hash, TransportModeAuto)
+	proxy, err := NewProxyWithTransport(server.MCPURL(), 0, map[string]string{}, hash, TransportModeAuto)
 	if err != nil {
 		t.Fatalf("failed to create the proxy: %v", err)
 	}
@@ -210,20 +146,13 @@ func TestStopsRenewingWhenTheServerStillRefuses(t *testing.T) {
 
 	// Reaching the browser is the correct outcome here; cancelling from it ends
 	// the wait for a code that no test is going to supply.
-	var opened int64
-	originalOpen := openBrowserFunc
-	defer func() { openBrowserFunc = originalOpen }()
-	openBrowserFunc = func(string) error {
-		atomic.AddInt64(&opened, 1)
-		proxy.cancel()
-		return nil
-	}
+	opened := captureBrowserOpens(t, proxy.cancel)
 
 	// The server refuses everything, so this cannot succeed. What matters is
 	// how it fails.
 	_ = proxy.connectToServer()
 
-	if got := atomic.LoadInt64(&opened); got != 1 {
+	if got := len(opened()); got != 1 {
 		t.Errorf("browser opened %d times, want 1: the user must be asked once renewal has not helped", got)
 	}
 	if got := atomic.LoadInt64(&renewals); got != 1 {
@@ -237,21 +166,15 @@ func TestStopsRenewingWhenTheServerStillRefuses(t *testing.T) {
 func TestRenewsBeforeUsingAnExpiringToken(t *testing.T) {
 	var renewals int64
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/token" {
-			http.NotFound(w, r)
-			return
-		}
+	server := newOAuthMockServer(t, "", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&renewals, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		writeJSONBody(w, map[string]any{
 			"access_token":  "fresh-access",
 			"refresh_token": "rotated",
 			"token_type":    "Bearer",
 			"expires_in":    3600,
 		})
-	}))
-	defer server.Close()
+	})
 
 	const hash = "renew-proactive"
 	seedAuthCache(t, hash, server.URL+"/token", map[string]any{
@@ -279,5 +202,87 @@ func TestRenewsBeforeUsingAnExpiringToken(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&renewals); got != 1 {
 		t.Errorf("token endpoint was called %d times, want 1: a fresh token needs no renewal", got)
+	}
+}
+
+// TestAFailedRenewalIsNotRetriedPerMessage guards the request path. Renewal is
+// reached from the header-building callback, which runs once per outgoing
+// message, so a refresh token the server has revoked used to cost a round trip
+// on every single message for the rest of the process's life.
+func TestAFailedRenewalIsNotRetriedPerMessage(t *testing.T) {
+	var attempts int64
+
+	server := newOAuthMockServer(t, "", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSONBody(w, map[string]any{"error": "invalid_grant"})
+	})
+
+	const hash = "renew-failure-backoff"
+	seedAuthCache(t, hash, server.URL+"/token", map[string]any{
+		"access_token":  "expiring-access",
+		"refresh_token": "revoked-refresh",
+		"expires_at":    time.Now().Add(-time.Minute).Unix(),
+	})
+
+	proxy, err := NewProxyWithTransport(server.MCPURL(), 0, map[string]string{}, hash, TransportModeAuto)
+	if err != nil {
+		t.Fatalf("failed to create the proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	for i := 0; i < 3; i++ {
+		if got := proxy.getAuthToken(); got != "expiring-access" {
+			t.Fatalf("token presented = %q, want the stored one to be used while renewal is failing", got)
+		}
+	}
+
+	if got := atomic.LoadInt64(&attempts); got != 1 {
+		t.Errorf("token endpoint was called %d times over 3 messages, want 1", got)
+	}
+}
+
+// TestRenewalIsNotAttemptedWhileAnotherProcessHoldsTheLock pins that the
+// request path does not wait on the authorization lock. The holder may be a
+// process sitting at a browser prompt, and stalling every message behind it for
+// minutes is worse than presenting a token the server can judge for itself.
+func TestRenewalIsNotAttemptedWhileAnotherProcessHoldsTheLock(t *testing.T) {
+	var attempts int64
+
+	server := newOAuthMockServer(t, "", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		writeJSONBody(w, map[string]any{"access_token": "renewed", "token_type": "Bearer", "expires_in": 3600})
+	})
+
+	const hash = "renew-lock-held"
+	seedAuthCache(t, hash, server.URL+"/token", map[string]any{
+		"access_token":  "expiring-access",
+		"refresh_token": "stored-refresh",
+		"expires_at":    time.Now().Add(-time.Minute).Unix(),
+	})
+
+	// Stand in for the process that holds the authorization lock.
+	lockFile := filepath.Join(os.Getenv("HOME"), ".mcp-remote-go-auth", hash, "authorize.lock")
+	held, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("failed to take the lock: %v", err)
+	}
+	defer func() { _ = held.Close(); _ = os.Remove(lockFile) }()
+
+	proxy, err := NewProxyWithTransport(server.MCPURL(), 0, map[string]string{}, hash, TransportModeAuto)
+	if err != nil {
+		t.Fatalf("failed to create the proxy: %v", err)
+	}
+	defer proxy.Shutdown()
+
+	start := time.Now()
+	if got := proxy.getAuthToken(); got != "expiring-access" {
+		t.Errorf("token presented = %q, want the stored one", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("a message waited %v on another process's authorization lock", elapsed)
+	}
+	if got := atomic.LoadInt64(&attempts); got != 0 {
+		t.Errorf("renewed %d times while another process held the lock, want 0", got)
 	}
 }

@@ -54,6 +54,30 @@ func (fl *FileLock) Lock(timeout time.Duration) error {
 }
 
 // Unlock releases the file lock
+// TryLock takes the lock if it is free this instant, and reports failure rather
+// than waiting.
+//
+// Waiting is the wrong answer on a request path: the caller there already holds
+// something it can use, and blocking a message behind another process's browser
+// prompt costs more than the work the lock protects.
+func (fl *FileLock) TryLock() error {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+
+	if fl.acquired {
+		return fmt.Errorf("lock already acquired")
+	}
+
+	file, err := os.OpenFile(fl.path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	fl.file = file
+	fl.acquired = true
+	return nil
+}
+
 func (fl *FileLock) Unlock() error {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()

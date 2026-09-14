@@ -22,6 +22,10 @@ import (
 // TransportMode specifies which transport to use.
 type TransportMode string
 
+// renewalRetryDelay is how long the request path leaves a failed renewal alone
+// before trying another.
+const renewalRetryDelay = time.Minute
+
 const (
 	TransportModeAuto           TransportMode = "auto"
 	TransportModeStreamableHTTP TransportMode = "streamable-http"
@@ -50,12 +54,14 @@ type Proxy struct {
 	// closing is noticed even while an authorization flow is in progress.
 	stdin *stdinQueue
 	// renewalTried guards against renewing an access token in a loop; see
-	// mayRenew.
-	renewalTried bool
-	writerMu     sync.Mutex
-	// stateMu guards transport, transportMode and serverProfile. Reconnection
-	// runs on the transport's error callback goroutine and replaces all three
-	// while the stdio reader is using them.
+	// mayRenew. renewalFailedAt holds off the request path after a renewal
+	// fails; see renewalWorthTrying.
+	renewalTried    bool
+	renewalFailedAt time.Time
+	writerMu        sync.Mutex
+	// stateMu guards transport, transportMode, serverProfile and the two
+	// renewal fields. Reconnection runs on the transport's error callback
+	// goroutine and replaces them while the stdio reader is using them.
 	stateMu sync.RWMutex
 	wg      sync.WaitGroup
 }
@@ -92,22 +98,13 @@ func (p *Proxy) setActiveTransport(t Transport, mode TransportMode) {
 	p.renewalTried = false
 }
 
-// markRenewed records that the access token has just been renewed, so a refusal
-// of the renewed token is not answered by renewing again.
-func (p *Proxy) markRenewed() {
-	p.stateMu.Lock()
-	defer p.stateMu.Unlock()
-	p.renewalTried = true
-}
-
-// mayRenew reports whether renewing the access token is still worth trying, and
-// records the attempt.
+// mayRenew reports whether renewing the access token is still worth trying for
+// this connection attempt, and records the attempt.
 //
-// A 401 that arrives on a token this process just renewed is not about the
-// token's age, and renewing again would loop between the server and the token
-// endpoint without the user ever being asked to authorize. One attempt per
-// connection is enough: setActiveTransport clears this once a token has been
-// accepted.
+// A 401 on a token this process just renewed is not about the token's age, and
+// renewing again would loop between the server and the token endpoint without
+// the user ever being asked. setActiveTransport clears this once a token has
+// been accepted, so the next expiry renews again.
 func (p *Proxy) mayRenew() bool {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
@@ -234,32 +231,48 @@ func (p *Proxy) Shutdown() {
 // when it is about to expire.
 //
 // Renewing here rather than after the server refuses the request costs the same
-// single round trip and spares the failed request, the reconnection behind it,
-// and -- for a token whose refresh has itself expired -- lets the browser flow
-// start before the user is mid-request.
+// single round trip and spares the failed request and the reconnection behind
+// it. This runs once per outgoing message, so it neither waits for the
+// authorization lock nor retries a renewal that has just failed: in both cases
+// the token in hand is presented and the server decides.
 func (p *Proxy) getAuthToken() string {
 	tokens, err := p.authCoord.LoadTokens()
 	if err != nil || tokens.AccessToken == "" {
 		return ""
 	}
-	if !tokens.DueForRenewal() {
+	if !tokens.DueForRenewal() || !p.renewalWorthTrying() {
 		return tokens.AccessToken
 	}
 
-	renewed, err := p.authCoord.RenewExclusively(p.ctx, p.serverURL)
+	renewed, err := p.authCoord.RenewIfUncontested(p.ctx, p.serverURL, tokens)
 	if err != nil {
-		if !errors.Is(err, auth.ErrNoRefreshToken) {
+		// Hold off before trying again. Without this, a revoked refresh token
+		// or an unreachable token endpoint costs a round trip on every single
+		// message for the rest of the process's life.
+		p.noteRenewalFailed()
+		if !errors.Is(err, auth.ErrNoRefreshToken) && !errors.Is(err, auth.ErrRenewalBusy) {
 			log.Printf("Could not renew the expiring access token: %v", err)
 		}
-		// Present what we have. The server is the authority on whether it is
-		// still good, and its refusal is handled where every other one is.
+		// The server is the authority on whether what we have is still good,
+		// and its refusal is handled where every other one is.
 		return tokens.AccessToken
 	}
-
-	// If the renewed token is refused as well, age was not the problem, and
-	// renewing a second time on its 401 would only delay asking the user.
-	p.markRenewed()
 	return renewed.AccessToken
+}
+
+// renewalWorthTrying reports whether enough time has passed since the last
+// failed renewal to try another.
+func (p *Proxy) renewalWorthTrying() bool {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return time.Since(p.renewalFailedAt) > renewalRetryDelay
+}
+
+// noteRenewalFailed records a failed renewal, which suppresses the next few.
+func (p *Proxy) noteRenewalFailed() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.renewalFailedAt = time.Now()
 }
 
 // connectToServer establishes a connection using the configured transport
@@ -268,24 +281,7 @@ func (p *Proxy) connectToServer() error {
 	if mode == TransportModeAuto {
 		return p.negotiateTransport()
 	}
-
-	t := p.createTransport(mode)
-	t.SetOnMessage(p.handleServerMessage)
-	t.SetOnError(p.handleServerError)
-
-	err := t.Connect(p.ctx)
-	if err != nil {
-		var unauth *UnauthorizedError
-		if errors.As(err, &unauth) {
-			log.Println("Authentication required")
-			return p.handleAuthentication(unauth.WWWAuthenticate)
-		}
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-
-	p.setActiveTransport(t, mode)
-	log.Println("Connected to server successfully")
-	return nil
+	return p.connectWithMode(mode)
 }
 
 // negotiateTransport probes the server to settle two questions at once: which
@@ -376,12 +372,9 @@ func (p *Proxy) probeServer() (serverProfile, error) {
 		HeaderMCPProtocolVersion: MCPProtocolVersion,
 	}, classifyLegacyProbe)
 	if err != nil {
-		var unauth *UnauthorizedError
-		if errors.As(err, &unauth) {
-			return serverProfile{}, err
-		}
-		log.Printf("Legacy probe failed: %v, falling back to SSE transport", err)
-		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+		// negotiateTransport tells an authentication challenge from a transport
+		// failure for both probes; there is nothing to add here.
+		return serverProfile{}, err
 	}
 
 	switch {
@@ -409,7 +402,7 @@ type probeOutcome struct {
 
 // sendProbe POSTs one probe body and classifies the reply with the classifier
 // matching the shape of the request that was sent.
-func (p *Proxy) sendProbe(body string, headers map[string]string, classify func([]byte) (serverEra, []string, bool)) (probeOutcome, error) {
+func (p *Proxy) sendProbe(body string, headers map[string]string, classify func([]byte) probeOutcome) (probeOutcome, error) {
 	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(body))
 	if err != nil {
 		return probeOutcome{}, fmt.Errorf("failed to create probe request: %w", err)
@@ -441,8 +434,9 @@ func (p *Proxy) sendProbe(body string, headers map[string]string, classify func(
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	era, supported, isJSONRPC := classify(probePayload(resp.Header.Get("Content-Type"), payload))
-	return probeOutcome{status: resp.StatusCode, era: era, supported: supported, isJSONRPC: isJSONRPC}, nil
+	outcome := classify(probePayload(resp.Header.Get("Content-Type"), payload))
+	outcome.status = resp.StatusCode
+	return outcome, nil
 }
 
 // connectWithMode connects using a specific transport mode.
@@ -532,13 +526,13 @@ func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 		}
 	}
 
-	mayRenew := p.mayRenew()
-
 	err := p.authCoord.AuthorizeExclusively(p.ctx, func() error {
 		// A 401 often means nothing more than an access token that aged out.
 		// Renewing costs one request and no user interaction, so it is tried
-		// before a browser window is put in front of anyone.
-		if mayRenew {
+		// before a browser window is put in front of anyone. The claim is taken
+		// here rather than before the lock, so that waiting for another
+		// process's token does not spend it.
+		if p.mayRenew() {
 			switch _, err := p.authCoord.Renew(p.ctx, p.serverURL); {
 			case err == nil:
 				log.Println("Renewed the access token; no authorization needed")
@@ -591,7 +585,7 @@ func (p *Proxy) authorize(initOpts []auth.InitOption) error {
 
 	log.Println("Auth code received, exchanging for tokens...")
 
-	tokens, err := p.authCoord.ExchangeCode(code)
+	tokens, err := p.authCoord.ExchangeCode(p.ctx, code)
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}

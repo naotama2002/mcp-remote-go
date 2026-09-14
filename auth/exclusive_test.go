@@ -19,12 +19,7 @@ func newFileLockFor(c *Coordinator) *filelock.FileLock {
 func newTestCoordinator(t *testing.T, hash string) *Coordinator {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
+	t.Setenv("HOME", t.TempDir())
 
 	c, err := NewCoordinator(hash, 0)
 	if err != nil {

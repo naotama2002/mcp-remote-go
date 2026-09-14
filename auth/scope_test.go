@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -172,15 +171,7 @@ func TestProtectedResourceScopesUsedForRegistrationAndAuthorization(t *testing.T
 	}))
 	defer resourceServer.Close()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	coordinator, err := NewCoordinator("scope-test-hash", 3346)
-	if err != nil {
-		t.Fatalf("NewCoordinator failed: %v", err)
-	}
+	coordinator := newTestCoordinator(t, "scope-test-hash")
 
 	authURL, err := coordinator.InitializeAuth(resourceServer.URL)
 	if err != nil {
@@ -250,15 +241,7 @@ func TestChallengeScopeOverridesAdvertisedScopes(t *testing.T) {
 	}))
 	defer resourceServer.Close()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	coordinator, err := NewCoordinator("challenge-scope-hash", 3347)
-	if err != nil {
-		t.Fatalf("NewCoordinator failed: %v", err)
-	}
+	coordinator := newTestCoordinator(t, "challenge-scope-hash")
 
 	authURL, err := coordinator.InitializeAuth(resourceServer.URL, WithChallengeScope("data:delete"))
 	if err != nil {

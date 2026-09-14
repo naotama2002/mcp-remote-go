@@ -145,7 +145,7 @@ func TestOAuthFlowIntegration(t *testing.T) {
 	}
 
 	// Test token exchange
-	tokens, err := coordinator.ExchangeCode(authCode)
+	tokens, err := coordinator.ExchangeCode(context.Background(), authCode)
 	if err != nil {
 		t.Fatalf("ExchangeCode failed: %v", err)
 	}

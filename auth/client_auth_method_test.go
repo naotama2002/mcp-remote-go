@@ -1,12 +1,12 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync/atomic"
 	"testing"
 )
@@ -119,15 +119,7 @@ func TestRegistrationDeclaresAdvertisedAuthMethod(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	coordinator, err := NewCoordinator("auth-method-hash", 3348)
-	if err != nil {
-		t.Fatalf("NewCoordinator failed: %v", err)
-	}
+	coordinator := newTestCoordinator(t, "auth-method-hash")
 
 	if _, err := coordinator.InitializeAuth(server.URL); err != nil {
 		t.Fatalf("InitializeAuth failed: %v", err)
@@ -186,19 +178,11 @@ func TestTokenRequestUsesBasicAuthWhenRegistered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
-
-	coordinator, err := NewCoordinator("basic-auth-hash", 3349)
-	if err != nil {
-		t.Fatalf("NewCoordinator failed: %v", err)
-	}
+	coordinator := newTestCoordinator(t, "basic-auth-hash")
 	if _, err := coordinator.InitializeAuth(server.URL); err != nil {
 		t.Fatalf("InitializeAuth failed: %v", err)
 	}
-	if _, err := coordinator.ExchangeCode("code-123"); err != nil {
+	if _, err := coordinator.ExchangeCode(context.Background(), "code-123"); err != nil {
 		t.Fatalf("ExchangeCode failed: %v", err)
 	}
 

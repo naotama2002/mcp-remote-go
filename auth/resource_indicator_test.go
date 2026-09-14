@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -96,7 +97,7 @@ func TestResourceParameterSentInAuthAndTokenRequests(t *testing.T) {
 	}
 
 	// Exchange the code and verify the token request carried the same resource.
-	if _, err := coordinator.ExchangeCode(authCode); err != nil {
+	if _, err := coordinator.ExchangeCode(context.Background(), authCode); err != nil {
 		t.Fatalf("ExchangeCode failed: %v", err)
 	}
 
