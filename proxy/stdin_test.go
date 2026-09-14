@@ -21,7 +21,7 @@ func TestStdinQueueNoticesCloseWithNobodyConsuming(t *testing.T) {
 	q := newStdinQueue(bufio.NewReader(pipeR))
 
 	closed := make(chan struct{})
-	go q.pump(func() { close(closed) })
+	go q.pump(context.Background(), func() { close(closed) })
 
 	// What a host does: send initialize, then give up and close the pipe. Nobody
 	// is calling next() -- the proxy is still busy connecting.
@@ -50,7 +50,7 @@ func TestStdinQueueKeepsMessagesUntilConsumed(t *testing.T) {
 	q := newStdinQueue(bufio.NewReader(strings.NewReader(first + second)))
 
 	done := make(chan struct{})
-	go q.pump(func() { close(done) })
+	go q.pump(context.Background(), func() { close(done) })
 
 	select {
 	case <-done:
@@ -82,7 +82,7 @@ func TestStdinQueueNextStopsOnContextCancel(t *testing.T) {
 	defer func() { _ = pipeW.Close() }()
 
 	q := newStdinQueue(bufio.NewReader(pipeR))
-	go q.pump(func() {})
+	go q.pump(context.Background(), func() {})
 
 	ctx, cancel := context.WithCancel(context.Background())
 

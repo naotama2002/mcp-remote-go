@@ -205,7 +205,7 @@ func (p *Proxy) Start() error {
 	// can mean waiting on an authorization flow, and a client that gives up
 	// during it closes this pipe; see stdinQueue for what reading late cost.
 	p.stdin = newStdinQueue(p.stdioReader)
-	go p.stdin.pump(p.handleStdioClosed)
+	go p.stdin.pump(p.ctx, p.handleStdioClosed)
 
 	if err := p.connectToServer(); err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
