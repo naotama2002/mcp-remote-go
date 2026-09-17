@@ -436,7 +436,7 @@ func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL stri
 
 	// Use the discovery service to find metadata
 	discoveryService := NewMetadataDiscoveryService()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 	defer cancel()
 
 	metadata, err := discoveryService.Discover(ctx, serverURL, WithProtectedResourceMetadataURL(resourceMetadataURL))
@@ -501,7 +501,7 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 
 	// Send registration request using httpclient
 	client := httpclient.New(nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), registrationTimeout)
 	defer cancel()
 
 	resp, err := client.Post(ctx, c.serverMetadata.RegistrationEndpoint, regReq, nil)

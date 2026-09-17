@@ -206,3 +206,20 @@ func TestWaitForAuthCodeStopsWhenTheClientGoesAway(t *testing.T) {
 		t.Errorf("waited %v after the client went away", elapsed)
 	}
 }
+
+// TestAbandonedLockThresholdCoversAWholeFlow pins the arithmetic that decides
+// whether a lock is still in use.
+//
+// The threshold has to sit above everything a holder does while holding it. Below
+// that, a flow that is merely slow -- a user taking their time at the browser,
+// after discovery and registration have each spent their own timeout -- is judged
+// abandoned, and a second process discards the lock and opens its own browser
+// window. That is the outcome the lock exists to prevent.
+func TestAbandonedLockThresholdCoversAWholeFlow(t *testing.T) {
+	longestFlow := discoveryTimeout + registrationTimeout + authCodeTimeout + tokenRequestTimeout
+
+	if authFlowMaxAge <= longestFlow {
+		t.Errorf("authFlowMaxAge is %v, which does not cover a flow that can legitimately take %v",
+			authFlowMaxAge, longestFlow)
+	}
+}

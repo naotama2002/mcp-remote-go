@@ -18,8 +18,20 @@ const (
 	grantTypeRefreshToken      = "refresh_token"
 )
 
-// tokenRequestTimeout bounds a single call to the token endpoint.
-const tokenRequestTimeout = 30 * time.Second
+// Bounds on the steps an authorization runs while it holds the per-server lock.
+// authFlowMaxAge is composed from these, so a change here cannot quietly make
+// the staleness threshold too small to cover a flow that is still running.
+const (
+	// discoveryTimeout bounds the whole discovery chain: protected resource
+	// metadata, RFC 8414, OpenID Connect and the fallback, in turn.
+	discoveryTimeout = 30 * time.Second
+
+	// registrationTimeout bounds dynamic client registration.
+	registrationTimeout = 30 * time.Second
+
+	// tokenRequestTimeout bounds a single call to the token endpoint.
+	tokenRequestTimeout = 30 * time.Second
+)
 
 // renewalSkew is the most time before expiry that an access token is treated as
 // due for renewal. Servers and clients do not share a clock, and a token that

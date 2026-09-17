@@ -24,10 +24,17 @@ const (
 	// authLockPoll is how often a waiting process looks for the holder's result.
 	authLockPoll = 250 * time.Millisecond
 
-	// authFlowMaxAge is the longest a flow can legitimately hold the lock: the
-	// browser wait, plus room for discovery, registration and the exchange
-	// around it. A lock older than this was left behind.
-	authFlowMaxAge = authCodeTimeout + time.Minute
+	// authFlowMaxAge is the longest a flow can legitimately hold the lock, and
+	// so how old a lock file has to be before it is taken as left behind.
+	//
+	// Every step the holder runs under the lock counts, not just the browser
+	// wait: discovery, registration and the code exchange each carry a timeout
+	// of their own around it. Set below their sum -- as "the browser wait plus
+	// a minute" was, by thirty seconds -- this discards the lock of a process
+	// that is still using it, and both end up at a browser. Worse, Unlock
+	// removes whatever file is at the path, so the discarded holder then takes
+	// away the lock its replacement had just taken.
+	authFlowMaxAge = authCodeTimeout + discoveryTimeout + registrationTimeout + tokenRequestTimeout + time.Minute
 )
 
 // AuthorizeExclusively runs authorize unless another process is already
