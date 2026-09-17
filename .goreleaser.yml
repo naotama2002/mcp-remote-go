@@ -10,6 +10,15 @@ builds:
     binary: mcp-remote-go
     env:
       - CGO_ENABLED=0
+    # Without these the released binaries report "version=dev commit=unknown",
+    # which is the first line of every log a bug report is filed with. The
+    # .mcpb bundles have always been stamped; the archives were not.
+    flags:
+      - -trimpath
+    ldflags:
+      - -X main.version={{ .Version }}
+      - -X main.gitCommit={{ .ShortCommit }}
+      - -X main.buildTime={{ .Date }}
     goos:
       - linux
       - windows

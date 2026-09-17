@@ -54,6 +54,30 @@ func (fl *FileLock) Lock(timeout time.Duration) error {
 }
 
 // Unlock releases the file lock
+// TryLock takes the lock if it is free this instant, and reports failure rather
+// than waiting.
+//
+// Waiting is the wrong answer on a request path: the caller there already holds
+// something it can use, and blocking a message behind another process's browser
+// prompt costs more than the work the lock protects.
+func (fl *FileLock) TryLock() error {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+
+	if fl.acquired {
+		return fmt.Errorf("lock already acquired")
+	}
+
+	file, err := os.OpenFile(fl.path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	fl.file = file
+	fl.acquired = true
+	return nil
+}
+
 func (fl *FileLock) Unlock() error {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
@@ -87,4 +111,28 @@ func (fl *FileLock) WithLock(timeout time.Duration, fn func() error) error {
 	defer func() { _ = fl.Unlock() }()
 
 	return fn()
+}
+
+// HeldSince reports whether some process currently holds this lock, and when it
+// was taken.
+//
+// A lock file is only ever removed by its holder, so its presence alone cannot
+// distinguish a live holder from one that died still holding it. The age is what
+// separates them: past any duration a holder could legitimately need, the file
+// is a leftover, and a caller that keeps waiting on it waits forever.
+func (fl *FileLock) HeldSince() (time.Time, bool) {
+	info, err := os.Stat(fl.path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
+// Discard removes the lock file without holding it, for a caller that has
+// established the holder is gone. It is a no-op when the lock is already free.
+func (fl *FileLock) Discard() error {
+	if err := os.Remove(fl.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to discard lock file: %w", err)
+	}
+	return nil
 }

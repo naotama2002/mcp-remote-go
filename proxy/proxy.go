@@ -22,6 +22,10 @@ import (
 // TransportMode specifies which transport to use.
 type TransportMode string
 
+// renewalRetryDelay is how long the request path leaves a failed renewal alone
+// before trying another.
+const renewalRetryDelay = time.Minute
+
 const (
 	TransportModeAuto           TransportMode = "auto"
 	TransportModeStreamableHTTP TransportMode = "streamable-http"
@@ -35,6 +39,10 @@ type Proxy struct {
 	headers       map[string]string
 	serverURLHash string
 	transportMode TransportMode
+	// serverProfile holds what auto-negotiation learned about the remote. The
+	// spec asks clients to cache the era for the lifetime of the origin; this
+	// process is scoped to exactly one origin, so the field is that cache.
+	serverProfile serverProfile
 	authCoord     *auth.Coordinator
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -42,8 +50,76 @@ type Proxy struct {
 	transport     Transport
 	stdioReader   *bufio.Reader
 	stdioWriter   *bufio.Writer
-	writerMu      sync.Mutex
-	wg            sync.WaitGroup
+	// stdin is the client's messages, read from startup so that the pipe
+	// closing is noticed even while an authorization flow is in progress.
+	stdin *stdinQueue
+	// renewalTried guards against renewing an access token in a loop; see
+	// mayRenew. renewalFailedAt holds off the request path after a renewal
+	// fails; see renewalWorthTrying.
+	renewalTried    bool
+	renewalFailedAt time.Time
+	writerMu        sync.Mutex
+	// stateMu guards transport, transportMode, serverProfile and the two
+	// renewal fields. Reconnection runs on the transport's error callback
+	// goroutine and replaces them while the stdio reader is using them.
+	stateMu sync.RWMutex
+	wg      sync.WaitGroup
+}
+
+// currentTransport returns the active transport, or nil if none is connected.
+func (p *Proxy) currentTransport() Transport {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.transport
+}
+
+// currentTransportMode returns the transport mode in use.
+func (p *Proxy) currentTransportMode() TransportMode {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.transportMode
+}
+
+// currentProfile returns what negotiation learned about the server.
+func (p *Proxy) currentProfile() serverProfile {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.serverProfile
+}
+
+// setActiveTransport records the connected transport and the mode it speaks.
+func (p *Proxy) setActiveTransport(t Transport, mode TransportMode) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.transport = t
+	p.transportMode = mode
+	// A connection stands, so whatever token it was made with was accepted.
+	// The next refusal is a new question, and renewal is on the table again.
+	p.renewalTried = false
+}
+
+// mayRenew reports whether renewing the access token is still worth trying for
+// this connection attempt, and records the attempt.
+//
+// A 401 on a token this process just renewed is not about the token's age, and
+// renewing again would loop between the server and the token endpoint without
+// the user ever being asked. setActiveTransport clears this once a token has
+// been accepted, so the next expiry renews again.
+func (p *Proxy) mayRenew() bool {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if p.renewalTried {
+		return false
+	}
+	p.renewalTried = true
+	return true
+}
+
+// setProfile records the result of auto-negotiation.
+func (p *Proxy) setProfile(profile serverProfile) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.serverProfile = profile
 }
 
 // NewProxy creates a new MCP proxy
@@ -122,6 +198,12 @@ func (p *Proxy) Start() error {
 	log.Println("Starting MCP proxy")
 	log.Println("Connecting to remote server:", p.serverURL)
 
+	// Start reading the client's end before connecting, not after. Connecting
+	// can mean waiting on an authorization flow, and a client that gives up
+	// during it closes this pipe; see stdinQueue for what reading late cost.
+	p.stdin = newStdinQueue(p.stdioReader)
+	go p.stdin.pump(p.ctx, p.handleStdioClosed)
+
 	if err := p.connectToServer(); err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -136,8 +218,8 @@ func (p *Proxy) Start() error {
 // Shutdown gracefully stops the proxy
 func (p *Proxy) Shutdown() {
 	log.Println("Shutting down proxy")
-	if p.transport != nil {
-		if err := p.transport.Close(); err != nil {
+	if t := p.currentTransport(); t != nil {
+		if err := t.Close(); err != nil {
 			log.Printf("Warning: failed to close transport: %v", err)
 		}
 	}
@@ -145,102 +227,216 @@ func (p *Proxy) Shutdown() {
 	p.wg.Wait()
 }
 
-// getAuthToken returns the current auth token if available.
+// getAuthToken returns the token to present to the server, renewing it first
+// when it is about to expire.
+//
+// Renewing here rather than after the server refuses the request costs the same
+// single round trip and spares the failed request and the reconnection behind
+// it. This runs once per outgoing message, so it neither waits for the
+// authorization lock nor retries a renewal that has just failed: in both cases
+// the token in hand is presented and the server decides.
 func (p *Proxy) getAuthToken() string {
 	tokens, err := p.authCoord.LoadTokens()
-	if err == nil && tokens.AccessToken != "" {
+	if err != nil || tokens.AccessToken == "" {
+		return ""
+	}
+	if !tokens.DueForRenewal() || !p.renewalWorthTrying() {
 		return tokens.AccessToken
 	}
-	return ""
+
+	renewed, err := p.authCoord.RenewIfUncontested(p.ctx, p.serverURL, tokens)
+	if err != nil {
+		// Hold off before trying again. Without this, a revoked refresh token
+		// or an unreachable token endpoint costs a round trip on every single
+		// message for the rest of the process's life.
+		p.noteRenewalFailed()
+		if !errors.Is(err, auth.ErrNoRefreshToken) && !errors.Is(err, auth.ErrRenewalBusy) {
+			log.Printf("Could not renew the expiring access token: %v", err)
+		}
+		// The server is the authority on whether what we have is still good,
+		// and its refusal is handled where every other one is.
+		return tokens.AccessToken
+	}
+	return renewed.AccessToken
+}
+
+// renewalWorthTrying reports whether enough time has passed since the last
+// failed renewal to try another.
+func (p *Proxy) renewalWorthTrying() bool {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return time.Since(p.renewalFailedAt) > renewalRetryDelay
+}
+
+// noteRenewalFailed records a failed renewal, which suppresses the next few.
+func (p *Proxy) noteRenewalFailed() {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	p.renewalFailedAt = time.Now()
 }
 
 // connectToServer establishes a connection using the configured transport
 func (p *Proxy) connectToServer() error {
-	if p.transportMode == TransportModeAuto {
+	mode := p.currentTransportMode()
+	if mode == TransportModeAuto {
 		return p.negotiateTransport()
 	}
+	return p.connectWithMode(mode)
+}
 
-	t := p.createTransport(p.transportMode)
-	t.SetOnMessage(p.handleServerMessage)
-	t.SetOnError(p.handleServerError)
+// negotiateTransport probes the server to settle two questions at once: which
+// transport shape it speaks, and which protocol era it implements.
+//
+// The probe is a modern server/discover request. A modern server answers it
+// with the list of versions it supports; a legacy one rejects it but still
+// replies in JSON-RPC over the same endpoint, which is enough to place it. A
+// server that does not answer POST at all is left to the deprecated HTTP+SSE
+// transport.
+func (p *Proxy) negotiateTransport() error {
+	log.Println("Auto-detecting transport...")
 
-	err := t.Connect(p.ctx)
+	profile, err := p.probeServer()
 	if err != nil {
 		var unauth *UnauthorizedError
 		if errors.As(err, &unauth) {
 			log.Println("Authentication required")
 			return p.handleAuthentication(unauth.WWWAuthenticate)
 		}
-		return fmt.Errorf("failed to connect: %w", err)
+		log.Printf("Probe failed: %v, falling back to SSE", err)
+		return p.connectWithMode(TransportModeSSE)
 	}
 
-	p.transport = t
-	log.Println("Connected to server successfully")
-	return nil
+	p.setProfile(profile)
+
+	if profile.era != eraUnknown {
+		log.Printf("Server implements the %s protocol era", profile.era)
+	}
+	if len(profile.supportedVersions) > 0 {
+		log.Printf("Server supports protocol versions: %s", strings.Join(profile.supportedVersions, ", "))
+	}
+	if !profile.supportsLegacy() {
+		// The compatibility matrix has no path from a legacy client to a
+		// modern-only server, so say so now rather than let the user debug a
+		// -32020 on their first tool call.
+		log.Println("Warning: this server no longer answers the initialize handshake. " +
+			"An MCP client older than 2026-07-28 cannot connect through this proxy.")
+	}
+
+	return p.connectWithMode(profile.transport)
 }
 
-// negotiateTransport attempts Streamable HTTP first, then falls back to SSE.
-func (p *Proxy) negotiateTransport() error {
-	log.Println("Auto-detecting transport...")
-
-	// Try Streamable HTTP first: send a POST probe to the server URL
-	probeReq, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":0}`))
+// probeServer settles the transport and, where it can, the era.
+//
+// The modern probe asks a question only a 2026-07-28 server can answer, so its
+// rejection is ambiguous: it may mean "wrong transport" or merely "I do not
+// speak that revision". Nothing in a plain-text rejection separates the two,
+// and guessing either way strands real servers -- guessing SSE breaks legacy
+// Streamable HTTP endpoints, guessing Streamable HTTP breaks endpoints that
+// host only the deprecated transport. So when the answer is ambiguous the
+// question is asked again in a shape every revision understands, and that reply
+// decides the transport.
+func (p *Proxy) probeServer() (serverProfile, error) {
+	modern, err := p.sendProbe(probeBody(), map[string]string{
+		HeaderMCPProtocolVersion: ProtocolVersion20260728,
+		HeaderMCPMethod:          "server/discover",
+	}, classifyProbe)
 	if err != nil {
-		// If we can't even create the request, fall back to SSE
-		log.Printf("Failed to create probe request: %v, falling back to SSE", err)
-		return p.connectWithMode(TransportModeSSE)
+		return serverProfile{}, err
+	}
+
+	switch {
+	case modern.status == http.StatusOK || modern.status == http.StatusAccepted:
+		log.Println("Server supports Streamable HTTP transport")
+		return serverProfile{transport: TransportModeStreamableHTTP, era: modern.era, supportedVersions: modern.supported}, nil
+
+	case modern.isJSONRPC:
+		// A JSON-RPC body means the server speaks the protocol on this
+		// endpoint even though it rejected this particular request, so the
+		// endpoint is a Streamable HTTP one regardless of the status.
+		log.Printf("Server returned %d with a JSON-RPC body, using Streamable HTTP transport", modern.status)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: modern.era, supportedVersions: modern.supported}, nil
+
+	case modern.status == http.StatusNotFound || modern.status == http.StatusMethodNotAllowed:
+		// Nothing here answers POST at all: the signature of a server hosting
+		// only the deprecated transport, whose POST endpoint is another URL.
+		log.Printf("Server returned %d without a JSON-RPC body, falling back to SSE transport", modern.status)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+	}
+
+	// Ambiguous. Ask in a pre-2026-07-28 shape, which any Streamable HTTP
+	// endpoint answers and a deprecated-transport endpoint still refuses.
+	log.Printf("Server returned %d without a JSON-RPC body; re-probing with a pre-%s request",
+		modern.status, ProtocolVersion20260728)
+
+	legacy, err := p.sendProbe(legacyProbeBody(), map[string]string{
+		HeaderMCPProtocolVersion: MCPProtocolVersion,
+	}, classifyLegacyProbe)
+	if err != nil {
+		// negotiateTransport tells an authentication challenge from a transport
+		// failure for both probes; there is nothing to add here.
+		return serverProfile{}, err
+	}
+
+	switch {
+	case legacy.status == http.StatusOK || legacy.status == http.StatusAccepted || legacy.isJSONRPC:
+		log.Printf("Server answered the pre-%s probe with %d, using Streamable HTTP transport",
+			ProtocolVersion20260728, legacy.status)
+		return serverProfile{transport: TransportModeStreamableHTTP, era: legacy.era, supportedVersions: legacy.supported}, nil
+
+	default:
+		// Neither shape of JSON-RPC request was answered on this endpoint, so
+		// it is not a Streamable HTTP one.
+		log.Printf("Server rejected the pre-%s probe with %d as well, falling back to SSE transport",
+			ProtocolVersion20260728, legacy.status)
+		return serverProfile{transport: TransportModeSSE, era: eraLegacy}, nil
+	}
+}
+
+// probeOutcome is what a single probe request revealed.
+type probeOutcome struct {
+	status    int
+	era       serverEra
+	supported []string
+	isJSONRPC bool
+}
+
+// sendProbe POSTs one probe body and classifies the reply with the classifier
+// matching the shape of the request that was sent.
+func (p *Proxy) sendProbe(body string, headers map[string]string, classify func([]byte) probeOutcome) (probeOutcome, error) {
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, p.serverURL, strings.NewReader(body))
+	if err != nil {
+		return probeOutcome{}, fmt.Errorf("failed to create probe request: %w", err)
 	}
 
 	for k, v := range p.headers {
-		probeReq.Header.Set(k, v)
+		req.Header.Set(k, v)
 	}
 	if token := p.getAuthToken(); token != "" {
-		probeReq.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	probeReq.Header.Set("Content-Type", "application/json")
-	probeReq.Header.Set("Accept", "application/json, text/event-stream")
-	probeReq.Header.Set(HeaderMCPProtocolVersion, MCPProtocolVersion)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
-	resp, err := p.client.Do(probeReq)
+	resp, err := p.client.Do(req)
 	if err != nil {
-		log.Printf("Streamable HTTP probe failed: %v, falling back to SSE", err)
-		return p.connectWithMode(TransportModeSSE)
+		return probeOutcome{}, fmt.Errorf("streamable HTTP probe failed: %w", err)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	wwwAuth := auth.BestWWWAuthenticateHeader(resp.Header.Values(HeaderWWWAuthenticate))
+	if resp.StatusCode == http.StatusUnauthorized {
+		return probeOutcome{}, unauthorizedFromResponse(resp)
+	}
+
+	payload, _ := io.ReadAll(resp.Body)
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		log.Printf("Warning: failed to close probe response body: %v", closeErr)
 	}
 
-	// Check if response body looks like JSON-RPC (indicates Streamable HTTP support)
-	isJSONRPC := len(body) > 0 && json.Valid(body) && isJSONRPCResponse(body)
-
-	switch {
-	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusAccepted:
-		// Server supports Streamable HTTP
-		log.Println("Server supports Streamable HTTP transport")
-		return p.connectWithMode(TransportModeStreamableHTTP)
-
-	case resp.StatusCode == http.StatusUnauthorized:
-		log.Println("Authentication required")
-		return p.handleAuthentication(wwwAuth)
-
-	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed:
-		// Server does not support Streamable HTTP, fall back to SSE
-		log.Printf("Server returned %d, falling back to SSE transport", resp.StatusCode)
-		return p.connectWithMode(TransportModeSSE)
-
-	case isJSONRPC:
-		// Server returned an error status but with a JSON-RPC body,
-		// which means it understands the protocol (Streamable HTTP)
-		log.Printf("Server returned %d with JSON-RPC body, using Streamable HTTP transport", resp.StatusCode)
-		return p.connectWithMode(TransportModeStreamableHTTP)
-
-	default:
-		log.Printf("Unexpected status %d from probe, falling back to SSE", resp.StatusCode)
-		return p.connectWithMode(TransportModeSSE)
-	}
+	outcome := classify(probePayload(resp.Header.Get("Content-Type"), payload))
+	outcome.status = resp.StatusCode
+	return outcome, nil
 }
 
 // connectWithMode connects using a specific transport mode.
@@ -259,8 +455,7 @@ func (p *Proxy) connectWithMode(mode TransportMode) error {
 		return fmt.Errorf("failed to connect with %s transport: %w", mode, err)
 	}
 
-	p.transport = t
-	p.transportMode = mode
+	p.setActiveTransport(t, mode)
 	log.Printf("Connected using %s transport", mode)
 	return nil
 }
@@ -274,6 +469,11 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 			Client:       p.client,
 			Headers:      p.headers,
 			GetAuthToken: p.getAuthToken,
+			// A server that cannot serve any revision older than 2026-07-28
+			// has no GET notification stream under any circumstances. For
+			// every other server the transport decides, once the local client
+			// has said which revision it speaks.
+			SkipNotificationStream: !p.currentProfile().supportsLegacy(),
 		})
 	default: // SSE
 		return NewSSETransport(SSETransportConfig{
@@ -284,6 +484,10 @@ func (p *Proxy) createTransport(mode TransportMode) Transport {
 		})
 	}
 }
+
+// openBrowserFunc is indirected so tests can assert whether the proxy would put
+// a browser window in front of the user.
+var openBrowserFunc = openBrowser
 
 // openBrowser opens the specified URL in the default browser
 func openBrowser(rawURL string) error {
@@ -299,40 +503,89 @@ func openBrowser(rawURL string) error {
 	return browser.OpenURL(rawURL)
 }
 
-// handleAuthentication runs the OAuth flow. When the triggering 401 carried a
+// handleAuthentication obtains a token for the server and reconnects.
+//
+// The interactive part runs under a per-server lock, so a second proxy for the
+// same server waits for this one's token instead of sending the user a second
+// browser window for the same account. When the triggering 401 carried a
 // WWW-Authenticate Bearer challenge, its resource_metadata URL (RFC 9728 §5.1)
-// is forwarded to discovery.
+// is forwarded to discovery and its scope (RFC 6750 §3.1) to the authorization
+// request.
 func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 	var initOpts []auth.InitOption
 	if wwwAuthenticate != "" {
-		if challenge, ok := auth.ParseWWWAuthenticate(wwwAuthenticate); ok && challenge.ResourceMetadata != "" {
-			log.Printf("Using resource_metadata URL from WWW-Authenticate: %s", challenge.ResourceMetadata)
-			initOpts = append(initOpts, auth.WithResourceMetadataURL(challenge.ResourceMetadata))
+		if challenge, ok := auth.ParseWWWAuthenticate(wwwAuthenticate); ok {
+			if challenge.ResourceMetadata != "" {
+				log.Printf("Using resource_metadata URL from WWW-Authenticate: %s", challenge.ResourceMetadata)
+				initOpts = append(initOpts, auth.WithResourceMetadataURL(challenge.ResourceMetadata))
+			}
+			if challenge.Scope != "" {
+				log.Printf("Requesting scope from WWW-Authenticate: %s", challenge.Scope)
+				initOpts = append(initOpts, auth.WithChallengeScope(challenge.Scope))
+			}
 		}
 	}
 
-	authURL, err := p.authCoord.InitializeAuth(p.serverURL, initOpts...)
+	err := p.authCoord.AuthorizeExclusively(p.ctx, func() error {
+		// A 401 often means nothing more than an access token that aged out.
+		// Renewing costs one request and no user interaction, so it is tried
+		// before a browser window is put in front of anyone. The claim is taken
+		// here rather than before the lock, so that waiting for another
+		// process's token does not spend it.
+		if p.mayRenew() {
+			switch _, err := p.authCoord.Renew(p.ctx, p.serverURL); {
+			case err == nil:
+				log.Println("Renewed the access token; no authorization needed")
+				return nil
+			case errors.Is(err, auth.ErrNoRefreshToken):
+				// Nothing stored to renew with, which is ordinary.
+			default:
+				log.Printf("Could not renew the access token, authorizing instead: %v", err)
+			}
+		}
+		return p.authorize(initOpts)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize auth: %w", err)
 	}
 
+	// Reached whether this process authorized or another one did, since either
+	// way there is now a token to connect with.
+	return p.connectToServer()
+}
+
+// authorize sends the user through the authorization server and stores the
+// tokens the returned code buys.
+func (p *Proxy) authorize(initOpts []auth.InitOption) error {
+	authURL, err := p.authCoord.InitializeAuth(p.serverURL, initOpts...)
+	if err != nil {
+		return err
+	}
+
+	// Discovery and registration take requests of their own, and the client may
+	// have closed its pipe during them. Opening a browser now would put a window
+	// in front of the user that authorizes a connection nobody is waiting for.
+	if err := p.ctx.Err(); err != nil {
+		return fmt.Errorf("abandoning authorization, the client is gone: %w", err)
+	}
+
 	log.Println("Please authorize access in your browser at:", authURL)
 
-	if err := openBrowser(authURL); err != nil {
+	if err := openBrowserFunc(authURL); err != nil {
 		log.Printf("Failed to open browser automatically: %v", err)
 		log.Println("Please open the URL manually in your browser.")
 	} else {
 		log.Println("Opening browser...")
 	}
 
-	code, err := p.authCoord.WaitForAuthCode()
+	code, err := p.authCoord.WaitForAuthCode(p.ctx)
 	if err != nil {
 		return fmt.Errorf("auth code retrieval failed: %w", err)
 	}
 
 	log.Println("Auth code received, exchanging for tokens...")
 
-	tokens, err := p.authCoord.ExchangeCode(code)
+	tokens, err := p.authCoord.ExchangeCode(p.ctx, code)
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
@@ -341,68 +594,37 @@ func (p *Proxy) handleAuthentication(wwwAuthenticate string) error {
 		return fmt.Errorf("failed to save tokens: %w", err)
 	}
 
-	return p.connectToServer()
+	return nil
 }
 
-// processStdioInput reads messages from stdin and forwards them to the server
-// stdioRead is one outcome of reading a line from stdin.
-type stdioRead struct {
-	line string
-	err  error
-}
-
-// processStdioInput reads messages from stdin and forwards them to the server.
-//
-// The read runs on a goroutine of its own because it cannot be interrupted:
-// selecting on the context around a blocking ReadString only checks it between
-// reads, so a cancelled context went unnoticed while stdin sat idle and
-// Shutdown waited here forever. That goroutine is deliberately not part of the
-// WaitGroup -- it may stay parked on a read that never returns, it holds
-// nothing, and it ends with the process.
+// processStdioInput forwards the client's messages to the server, in order, from
+// the queue the reader has been filling since the proxy started.
 func (p *Proxy) processStdioInput() {
 	defer p.wg.Done()
 
-	reads := make(chan stdioRead)
-	go func() {
-		for {
-			line, err := p.stdioReader.ReadString('\n')
-			select {
-			case reads <- stdioRead{line: line, err: err}:
-			case <-p.ctx.Done():
-				return
-			}
-			if err != nil && errors.Is(err, io.EOF) {
-				return
-			}
-		}
-	}()
-
 	for {
-		select {
-		case <-p.ctx.Done():
+		line, ok := p.stdin.next(p.ctx)
+		if !ok {
 			return
-		case read := <-reads:
-			if read.err != nil {
-				if errors.Is(read.err, io.EOF) {
-					log.Println("STDIO input closed")
-					// Close the transport and cancel directly rather than
-					// calling Shutdown, which waits on the WaitGroup this
-					// goroutine has not yet released.
-					if p.transport != nil {
-						if closeErr := p.transport.Close(); closeErr != nil {
-							log.Printf("Warning: failed to close transport: %v", closeErr)
-						}
-					}
-					p.cancel()
-					return
-				}
-				log.Printf("Error reading from STDIO: %v", read.err)
-				continue
-			}
+		}
+		p.forwardToServer(line)
+	}
+}
 
-			p.forwardToServer(read.line)
+// handleStdioClosed reacts to the client closing its end of the pipe, which is
+// how an MCP host says it is finished with this server.
+//
+// The transport is closed and the context cancelled directly rather than through
+// Shutdown, which waits on the WaitGroup that the forwarding goroutine is in.
+func (p *Proxy) handleStdioClosed() {
+	log.Println("STDIO input closed")
+
+	if t := p.currentTransport(); t != nil {
+		if err := t.Close(); err != nil {
+			log.Printf("Warning: failed to close transport: %v", err)
 		}
 	}
+	p.cancel()
 }
 
 // forwardToServer logs a client message and hands it to the transport.
@@ -416,11 +638,12 @@ func (p *Proxy) forwardToServer(line string) {
 		}
 	}
 
-	if p.transport == nil {
+	transport := p.currentTransport()
+	if transport == nil {
 		log.Printf("Error sending to server: not connected")
 		return
 	}
-	if err := p.transport.Send(p.ctx, []byte(line)); err != nil {
+	if err := transport.Send(p.ctx, []byte(line)); err != nil {
 		log.Printf("Error sending to server: %v", err)
 	}
 }
@@ -484,16 +707,6 @@ func (p *Proxy) handleServerError(err error) {
 	}
 }
 
-// isJSONRPCResponse checks if the body looks like a JSON-RPC response.
-func isJSONRPCResponse(body []byte) bool {
-	var obj map[string]interface{}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false
-	}
-	_, hasJSONRPC := obj["jsonrpc"]
-	return hasJSONRPC
-}
-
 // SetStdio replaces the stdio reader and writer (for testing).
 func (p *Proxy) SetStdio(reader *bufio.Reader, writer *bufio.Writer) {
 	p.stdioReader = reader
@@ -502,14 +715,14 @@ func (p *Proxy) SetStdio(reader *bufio.Reader, writer *bufio.Writer) {
 
 // SetCommandEndpoint sets the command endpoint URL (for backward compatibility in tests).
 func (p *Proxy) SetCommandEndpoint(endpoint string) {
-	if sseTransport, ok := p.transport.(*SSETransport); ok {
+	if sseTransport, ok := p.currentTransport().(*SSETransport); ok {
 		sseTransport.setCommandEndpoint(endpoint)
 	}
 }
 
 // GetCommandEndpoint returns the command endpoint URL (for backward compatibility in tests).
 func (p *Proxy) GetCommandEndpoint() string {
-	if sseTransport, ok := p.transport.(*SSETransport); ok {
+	if sseTransport, ok := p.currentTransport().(*SSETransport); ok {
 		return sseTransport.getCommandEndpointValue()
 	}
 	return ""

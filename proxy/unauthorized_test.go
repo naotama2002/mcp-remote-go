@@ -121,6 +121,10 @@ func TestStreamableHTTPNotificationStreamUnauthorizedCallsOnError(t *testing.T) 
 		t.Fatalf("Connect failed: %v", err)
 	}
 
+	// The GET stream is opened once the client declares a revision that has
+	// one; this server answers it with the 401 under test.
+	_ = transport.Send(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`))
+
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):

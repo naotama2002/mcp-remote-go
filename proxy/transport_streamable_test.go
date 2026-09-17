@@ -386,23 +386,32 @@ func TestStreamableHTTPTransportNotificationStreamSuccess(t *testing.T) {
 		t.Fatalf("Connect failed: %v", err)
 	}
 
+	// The GET stream only exists on revisions before 2026-07-28, so it is
+	// opened once the client has declared one of them.
+	if err := transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`)); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
 	// Wait for notification stream events to arrive
 	time.Sleep(300 * time.Millisecond)
 
+	// The response to the request that opened the stream arrives on this
+	// callback too, so look at the notifications rather than at a position.
 	mu.Lock()
-	count := len(received)
+	var notifications []string
+	for _, message := range received {
+		if strings.Contains(message, `"method"`) {
+			notifications = append(notifications, message)
+		}
+	}
 	mu.Unlock()
 
-	if count < 2 {
-		t.Fatalf("Expected at least 2 notification events from GET stream, got %d", count)
+	if len(notifications) < 2 {
+		t.Fatalf("Expected at least 2 notification events from GET stream, got %d (all messages: %v)", len(notifications), received)
 	}
 
-	// Verify first notification
-	mu.Lock()
-	first := received[0]
-	mu.Unlock()
-	if !strings.Contains(first, "notifications/tools/listChanged") {
-		t.Errorf("Expected first notification to contain 'notifications/tools/listChanged', got: %s", first)
+	if !strings.Contains(notifications[0], "notifications/tools/listChanged") {
+		t.Errorf("Expected first notification to contain 'notifications/tools/listChanged', got: %s", notifications[0])
 	}
 
 	_ = transport.Close()
@@ -457,6 +466,12 @@ func TestStreamableHTTPTransportLastEventIDResumption(t *testing.T) {
 	err := transport.Connect(t.Context())
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// Resumption belongs to the revisions that have a GET stream, so the
+	// client declares one before it can be exercised.
+	if err := transport.Send(t.Context(), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`)); err != nil {
+		t.Fatalf("Send failed: %v", err)
 	}
 
 	// Wait for first connection events + reconnect + second connection
