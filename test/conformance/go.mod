@@ -6,7 +6,7 @@
 // the main module, which deliberately depends on almost nothing.
 module github.com/naotama2002/mcp-remote-go/test/conformance
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0-pre.3
