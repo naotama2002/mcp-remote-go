@@ -41,8 +41,8 @@ func TestE2EStreamableHTTPAutoNegotiation(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify auto-negotiation selected Streamable HTTP
-	if proxy.transportMode != TransportModeStreamableHTTP {
-		t.Fatalf("Expected auto-negotiation to select streamable-http, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeStreamableHTTP {
+		t.Fatalf("Expected auto-negotiation to select streamable-http, got '%s'", proxy.currentTransportMode())
 	}
 
 	// Send initialize via stdin
@@ -305,8 +305,8 @@ func TestE2ESSEFallbackPipeline(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify SSE was selected
-	if proxy.transportMode != TransportModeSSE {
-		t.Fatalf("Expected auto-negotiation to fall back to SSE, got '%s'", proxy.transportMode)
+	if proxy.currentTransportMode() != TransportModeSSE {
+		t.Fatalf("Expected auto-negotiation to fall back to SSE, got '%s'", proxy.currentTransportMode())
 	}
 
 	// Send initialize

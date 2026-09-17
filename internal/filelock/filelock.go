@@ -88,3 +88,27 @@ func (fl *FileLock) WithLock(timeout time.Duration, fn func() error) error {
 
 	return fn()
 }
+
+// HeldSince reports whether some process currently holds this lock, and when it
+// was taken.
+//
+// A lock file is only ever removed by its holder, so its presence alone cannot
+// distinguish a live holder from one that died still holding it. The age is what
+// separates them: past any duration a holder could legitimately need, the file
+// is a leftover, and a caller that keeps waiting on it waits forever.
+func (fl *FileLock) HeldSince() (time.Time, bool) {
+	info, err := os.Stat(fl.path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
+// Discard removes the lock file without holding it, for a caller that has
+// established the holder is gone. It is a no-op when the lock is already free.
+func (fl *FileLock) Discard() error {
+	if err := os.Remove(fl.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to discard lock file: %w", err)
+	}
+	return nil
+}
