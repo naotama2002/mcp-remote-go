@@ -24,25 +24,17 @@ const (
 	// authLockPoll is how often a waiting process looks for the holder's result.
 	authLockPoll = 250 * time.Millisecond
 
-	// authFlowMaxAge is the longest a flow can legitimately hold the lock: the
-	// browser wait, plus room for discovery, registration and the exchange
-	// around it. A lock older than this was left behind.
-	authFlowMaxAge = authCodeTimeout + time.Minute
-)
-
-// waitOutcome is what waiting on another process's authorization produced.
-type waitOutcome int
-
-const (
-	// waitNoToken means that flow ended without storing a token, so this
-	// process has to authorize after all.
-	waitNoToken waitOutcome = iota
-
-	// waitGotToken means the other process stored a token this one can use.
-	waitGotToken
-
-	// waitCancelled means this process's own client went away while waiting.
-	waitCancelled
+	// authFlowMaxAge is the longest a flow can legitimately hold the lock, and
+	// so how old a lock file has to be before it is taken as left behind.
+	//
+	// Every step the holder runs under the lock counts, not just the browser
+	// wait: discovery, registration and the code exchange each carry a timeout
+	// of their own around it. Set below their sum -- as "the browser wait plus
+	// a minute" was, by thirty seconds -- this discards the lock of a process
+	// that is still using it, and both end up at a browser. Worse, Unlock
+	// removes whatever file is at the path, so the discarded holder then takes
+	// away the lock its replacement had just taken.
+	authFlowMaxAge = authCodeTimeout + discoveryTimeout + registrationTimeout + tokenRequestTimeout + time.Minute
 )
 
 // AuthorizeExclusively runs authorize unless another process is already
@@ -76,21 +68,22 @@ func (c *Coordinator) AuthorizeExclusively(ctx context.Context, authorize func()
 		log.Println("Another process is authorizing this server; waiting for its result " +
 			"rather than opening a second browser window")
 
-		switch c.waitForOtherProcess(ctx, before) {
-		case waitGotToken:
+		gotToken, waitErr := c.waitForOtherProcess(ctx, lock, before)
+		switch {
+		case waitErr != nil:
+			return fmt.Errorf("authorization abandoned: %w", waitErr)
+		case gotToken:
 			log.Println("The other process finished authorizing; using the token it stored")
 			return nil
-		case waitCancelled:
-			return fmt.Errorf("authorization abandoned: %w", ctx.Err())
-		default:
-			log.Println("The other process stored no token; authorizing here instead")
-			// Take the lock if it is free now, so a third process waits for
-			// this flow rather than starting its own.
-			if lockErr := lock.Lock(authLockProbe); lockErr == nil {
-				defer func() { _ = lock.Unlock() }()
-			}
-			return authorize()
 		}
+
+		log.Println("The other process stored no token; authorizing here instead")
+		// Take the lock if it is free now, so a third process waits for this
+		// flow rather than starting its own.
+		if lockErr := lock.Lock(authLockProbe); lockErr == nil {
+			defer func() { _ = lock.Unlock() }()
+		}
+		return authorize()
 	}
 	defer func() { _ = lock.Unlock() }()
 
@@ -104,35 +97,42 @@ func (c *Coordinator) AuthorizeExclusively(ctx context.Context, authorize func()
 	return authorize()
 }
 
-// waitForOtherProcess watches for the authorizing process to store a token.
+// waitForOtherProcess watches for the authorizing process to store a token,
+// reporting whether one arrived.
 //
 // It stops as soon as that process releases the lock without having stored one
 // -- its flow failed, or it was killed -- so a failure there does not strand
 // this process for the full timeout.
-func (c *Coordinator) waitForOtherProcess(ctx context.Context, before string) waitOutcome {
-	lock := filelock.New(c.getAuthLockPath())
+func (c *Coordinator) waitForOtherProcess(ctx context.Context, lock *filelock.FileLock, before string) (bool, error) {
+	// The holder may have finished in the moment it took to get here, which is
+	// the common case; checking before the first tick saves waiting one out.
 	deadline := time.Now().Add(authFlowMaxAge)
 
 	ticker := time.NewTicker(authLockPoll)
 	defer ticker.Stop()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return waitCancelled
-		case <-ticker.C:
-		}
-
 		if token := c.cachedAccessToken(); token != "" && token != before {
-			return waitGotToken
+			return true, nil
 		}
 
 		takenAt, held := lock.HeldSince()
 		if !held {
-			return waitNoToken
+			return false, nil
 		}
-		if time.Since(takenAt) > authFlowMaxAge || time.Now().After(deadline) {
-			return waitNoToken
+		if time.Since(takenAt) > authFlowMaxAge {
+			return false, nil
+		}
+		// The lock's own age does not bound this wait on its own: a succession
+		// of processes can keep taking it, each with a fresh mtime.
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }

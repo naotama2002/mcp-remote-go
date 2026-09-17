@@ -19,12 +19,7 @@ func newFileLockFor(c *Coordinator) *filelock.FileLock {
 func newTestCoordinator(t *testing.T, hash string) *Coordinator {
 	t.Helper()
 
-	tmpDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() { _ = os.Setenv("HOME", originalHome) })
-	if err := os.Setenv("HOME", tmpDir); err != nil {
-		t.Fatalf("failed to set HOME: %v", err)
-	}
+	t.Setenv("HOME", t.TempDir())
 
 	c, err := NewCoordinator(hash, 0)
 	if err != nil {
@@ -209,5 +204,22 @@ func TestWaitForAuthCodeStopsWhenTheClientGoesAway(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("waited %v after the client went away", elapsed)
+	}
+}
+
+// TestAbandonedLockThresholdCoversAWholeFlow pins the arithmetic that decides
+// whether a lock is still in use.
+//
+// The threshold has to sit above everything a holder does while holding it. Below
+// that, a flow that is merely slow -- a user taking their time at the browser,
+// after discovery and registration have each spent their own timeout -- is judged
+// abandoned, and a second process discards the lock and opens its own browser
+// window. That is the outcome the lock exists to prevent.
+func TestAbandonedLockThresholdCoversAWholeFlow(t *testing.T) {
+	longestFlow := discoveryTimeout + registrationTimeout + authCodeTimeout + tokenRequestTimeout
+
+	if authFlowMaxAge <= longestFlow {
+		t.Errorf("authFlowMaxAge is %v, which does not cover a flow that can legitimately take %v",
+			authFlowMaxAge, longestFlow)
 	}
 }

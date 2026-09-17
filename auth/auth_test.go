@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -330,7 +331,7 @@ func TestExchangeCode(t *testing.T) {
 	}
 
 	// Exchange authorization code
-	tokens, err := coordinator.ExchangeCode("test-auth-code")
+	tokens, err := coordinator.ExchangeCode(context.Background(), "test-auth-code")
 	if err != nil {
 		t.Fatalf("ExchangeCode failed: %v", err)
 	}
@@ -387,7 +388,7 @@ func TestExchangeCodeError(t *testing.T) {
 	}
 
 	// Exchange authorization code (should fail)
-	_, err = coordinator.ExchangeCode("invalid-code")
+	_, err = coordinator.ExchangeCode(context.Background(), "invalid-code")
 	if err == nil {
 		t.Error("ExchangeCode should fail with invalid server response")
 	}
@@ -420,7 +421,7 @@ func TestExchangeCodeNotInitialized(t *testing.T) {
 	}
 
 	// Exchange authorization code in uninitialized state (should fail)
-	_, err = coordinator.ExchangeCode("test-code")
+	_, err = coordinator.ExchangeCode(context.Background(), "test-code")
 	if err == nil {
 		t.Error("ExchangeCode should fail when not initialized")
 	}

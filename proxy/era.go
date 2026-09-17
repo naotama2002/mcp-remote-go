@@ -169,24 +169,24 @@ func probePayload(contentType string, body []byte) []byte {
 // classifyProbe reads a reply to the modern server/discover probe and reports
 // what it proves about the server. isJSONRPC distinguishes a server that speaks
 // the protocol from one that merely returned a status code.
-func classifyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bool) {
+func classifyProbe(body []byte) probeOutcome {
 	parsed, ok := parseProbeResponse(body)
 	if !ok {
-		return eraUnknown, nil, false
+		return probeOutcome{era: eraUnknown}
 	}
 
 	switch {
 	case parsed.Result != nil:
 		// Only a modern server answers server/discover with a result.
-		return eraModern, parsed.Result.SupportedVersions, true
+		return probeOutcome{era: eraModern, supported: parsed.Result.SupportedVersions, isJSONRPC: true}
 
 	case modernError(parsed):
-		return eraModern, modernSupportedVersions(parsed), true
+		return probeOutcome{era: eraModern, supported: modernSupportedVersions(parsed), isJSONRPC: true}
 
 	default:
 		// A JSON-RPC error that is not one of the modern codes: the server
 		// speaks the protocol over this endpoint but not this revision.
-		return eraLegacy, nil, true
+		return probeOutcome{era: eraLegacy, isJSONRPC: true}
 	}
 }
 
@@ -196,16 +196,16 @@ func classifyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bo
 // not evidence of a modern server -- quite the opposite: the request carried no
 // per-request metadata, which a modern server rejects, so answering it happily
 // is what a legacy server does.
-func classifyLegacyProbe(body []byte) (era serverEra, supported []string, isJSONRPC bool) {
+func classifyLegacyProbe(body []byte) probeOutcome {
 	parsed, ok := parseProbeResponse(body)
 	if !ok {
-		return eraUnknown, nil, false
+		return probeOutcome{era: eraUnknown}
 	}
 
 	if modernError(parsed) {
-		return eraModern, modernSupportedVersions(parsed), true
+		return probeOutcome{era: eraModern, supported: modernSupportedVersions(parsed), isJSONRPC: true}
 	}
-	return eraLegacy, nil, true
+	return probeOutcome{era: eraLegacy, isJSONRPC: true}
 }
 
 func parseProbeResponse(body []byte) (probeResponse, bool) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"time"
 )
 
 // stdinQueue reads the client's end of the pipe from the moment the proxy
@@ -46,7 +47,7 @@ func newStdinQueue(reader *bufio.Reader) *stdinQueue {
 // It is deliberately not part of the proxy's WaitGroup: a blocking read cannot
 // be interrupted, so this may stay parked on a read that never returns. It holds
 // nothing and ends with the process.
-func (q *stdinQueue) pump(onClose func()) {
+func (q *stdinQueue) pump(ctx context.Context, onClose func()) {
 	for {
 		line, err := q.reader.ReadString('\n')
 		if err == nil {
@@ -58,11 +59,22 @@ func (q *stdinQueue) pump(onClose func()) {
 			onClose()
 			return
 		}
-		// Any other read error is reported and retried, as it always has been:
-		// it says nothing about whether the client is still there.
+
+		// Any other read error is reported and retried: it says nothing about
+		// whether the client is still there. Retried after a pause, though --
+		// an error that persists would otherwise spin this loop at full speed
+		// for the life of the process, and the context is what ends it.
 		log.Printf("Error reading from STDIO: %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(readErrorRetryDelay):
+		}
 	}
 }
+
+// readErrorRetryDelay paces retries after a read error that is not EOF.
+const readErrorRetryDelay = 100 * time.Millisecond
 
 // next returns the oldest queued line, waiting for one to arrive. ok is false
 // once ctx is done, or the client has closed its end and the queue is drained.

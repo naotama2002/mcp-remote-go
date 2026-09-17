@@ -207,18 +207,16 @@ func (c *Coordinator) WaitForAuthCode(ctx context.Context) (string, error) {
 	}
 }
 
-// ExchangeCode exchanges the authorization code for tokens
-func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
+// ExchangeCode exchanges the authorization code for tokens.
+func (c *Coordinator) ExchangeCode(ctx context.Context, code string) (*Tokens, error) {
 	if c.serverMetadata == nil || c.clientInfo == nil {
 		return nil, errors.New("auth not initialized")
 	}
 
-	// Prepare form data for token request
 	formData := map[string]string{
 		"grant_type":   grantTypeAuthorizationCode,
 		"code":         code,
 		"redirect_uri": fmt.Sprintf("http://localhost:%d/callback", c.callbackPort),
-		"client_id":    c.clientInfo.ClientID,
 	}
 
 	// RFC 8707 resource indicator (required by the MCP authorization spec).
@@ -231,29 +229,11 @@ func (c *Coordinator) ExchangeCode(code string) (*Tokens, error) {
 		formData["code_verifier"] = c.codeVerifier
 	}
 
-	// Authenticate the request the way this client is registered to.
-	headers := make(map[string]string)
-	c.applyClientAuthentication(c.clientInfo, formData, headers)
-
-	// Create HTTP client and send request
-	client := httpclient.New(nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := client.PostForm(ctx, c.serverMetadata.TokenEndpoint, formData, headers)
+	tokens, err := c.requestTokens(ctx, formData)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
-	defer func() { _ = resp.SafeClose() }()
-
-	// Parse tokens
-	var tokens Tokens
-	if err := resp.JSON(&tokens); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
-	}
-
-	tokens.stampExpiry(time.Now())
-	return &tokens, nil
+	return tokens, nil
 }
 
 // LoadTokens loads tokens from disk with file locking
@@ -354,27 +334,27 @@ func (c *Coordinator) tokenEndpointAuthMethod() string {
 // The method comes from the registration response when the server stated one:
 // that is the server's own record of how this client must authenticate, which
 // outranks any preference of ours.
-func (c *Coordinator) applyClientAuthentication(clientInfo *ClientInfo, formData map[string]string, headers map[string]string) {
-	method := clientInfo.TokenEndpointAuthMethod
-	if method == "" {
-		method = c.tokenEndpointAuthMethod()
-	}
-
-	if clientInfo.ClientSecret == "" {
+func (c *Coordinator) applyClientAuthentication(formData map[string]string, headers map[string]string) {
+	if c.clientInfo.ClientSecret == "" {
 		// Nothing to authenticate with; client_id in the body identifies the
 		// client, as a public client does.
 		return
 	}
 
+	method := c.clientInfo.TokenEndpointAuthMethod
+	if method == "" {
+		method = c.tokenEndpointAuthMethod()
+	}
+
 	if method == authMethodSecretBasic {
 		// RFC 6749 §2.3.1: both parts are form-urlencoded before being joined
-		// and base64-encoded, and the id must not also appear in the body.
-		credentials := url.QueryEscape(clientInfo.ClientID) + ":" + url.QueryEscape(clientInfo.ClientSecret)
+		// and base64-encoded.
+		credentials := url.QueryEscape(c.clientInfo.ClientID) + ":" + url.QueryEscape(c.clientInfo.ClientSecret)
 		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(credentials))
 		return
 	}
 
-	formData["client_secret"] = clientInfo.ClientSecret
+	formData["client_secret"] = c.clientInfo.ClientSecret
 }
 
 // offlineAccessScope is the scope that asks for a refresh token. The proxy
@@ -436,8 +416,8 @@ func nonEmptyScopes(scopes []string) []string {
 	return out
 }
 
-func containsTrimmed(scopes []string, want string) bool {
-	for _, s := range scopes {
+func containsTrimmed(values []string, want string) bool {
+	for _, s := range values {
 		if strings.TrimSpace(s) == want {
 			return true
 		}
@@ -456,7 +436,7 @@ func (c *Coordinator) discoverServerMetadata(serverURL, resourceMetadataURL stri
 
 	// Use the discovery service to find metadata
 	discoveryService := NewMetadataDiscoveryService()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 	defer cancel()
 
 	metadata, err := discoveryService.Discover(ctx, serverURL, WithProtectedResourceMetadataURL(resourceMetadataURL))
@@ -521,7 +501,7 @@ func (c *Coordinator) loadOrRegisterClient() (*ClientInfo, error) {
 
 	// Send registration request using httpclient
 	client := httpclient.New(nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), registrationTimeout)
 	defer cancel()
 
 	resp, err := client.Post(ctx, c.serverMetadata.RegistrationEndpoint, regReq, nil)

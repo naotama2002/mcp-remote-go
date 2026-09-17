@@ -84,17 +84,17 @@ func TestClassifyProbe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			era, supported, isJSONRPC := classifyProbe([]byte(tt.body))
+			got := classifyProbe([]byte(tt.body))
 
-			if era != tt.wantEra {
-				t.Errorf("era = %v, want %v", era, tt.wantEra)
+			if got.era != tt.wantEra {
+				t.Errorf("era = %v, want %v", got.era, tt.wantEra)
 			}
-			if isJSONRPC != tt.wantJSONRPC {
-				t.Errorf("isJSONRPC = %v, want %v", isJSONRPC, tt.wantJSONRPC)
+			if got.isJSONRPC != tt.wantJSONRPC {
+				t.Errorf("isJSONRPC = %v, want %v", got.isJSONRPC, tt.wantJSONRPC)
 			}
-			if len(supported) != 0 || len(tt.wantSupported) != 0 {
-				if !reflect.DeepEqual(supported, tt.wantSupported) {
-					t.Errorf("supported = %v, want %v", supported, tt.wantSupported)
+			if len(got.supported) != 0 || len(tt.wantSupported) != 0 {
+				if !reflect.DeepEqual(got.supported, tt.wantSupported) {
+					t.Errorf("supported = %v, want %v", got.supported, tt.wantSupported)
 				}
 			}
 		})
