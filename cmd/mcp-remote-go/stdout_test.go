@@ -133,7 +133,12 @@ func TestShutdownWritesNothingToStdout(t *testing.T) {
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
 	select {
-	case <-waited:
+	case err := <-waited:
+		// The signal handler exits zero. Any other status means the proxy left
+		// by some other route, which is worth seeing beside what it wrote.
+		if err != nil {
+			t.Errorf("the proxy exited with %v, want a clean exit on SIGTERM", err)
+		}
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("the proxy did not exit after SIGTERM")
@@ -203,7 +208,10 @@ func TestSignalTerminatesWithStdinIdle(t *testing.T) {
 	go func() { waited <- cmd.Wait() }()
 
 	select {
-	case <-waited:
+	case err := <-waited:
+		if err != nil {
+			t.Errorf("the proxy exited with %v, want a clean exit on SIGTERM", err)
+		}
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("the proxy did not exit on SIGTERM while stdin was open and idle")
